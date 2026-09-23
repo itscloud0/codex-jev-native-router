@@ -307,7 +307,9 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     managed = {
         "model": 'model = "jev-shadow"\n',
         "model_reasoning_effort": 'model_reasoning_effort = "medium"\n',
-        "openai_base_url": f'openai_base_url = {toml_string(f"http://127.0.0.1:{port}/{capability}")}\n',
+        # The Desktop adapter and CLI wrapper set their own execution endpoint.
+        # A global relay URL can also affect built-in tools such as Image Gen.
+        "openai_base_url": before["openai_base_url"],
         "model_catalog_json": f'model_catalog_json = {toml_string(str(root / "models.json"))}\n',
     }
     updated = edit_root(original_text, before, managed)
@@ -513,8 +515,23 @@ def enable(root: Path = ROOT, start: bool = True) -> None:
     manifest = load_json(root / "manifest.json")
     if manifest["config_state"] == "disabled":
         path = Path(manifest["config_path"])
-        updated = edit_root(path.read_text(), manifest["original_root"], manifest["managed_root"])
+        current = path.read_text()
+        original = manifest["original_root"]
+        managed = manifest["managed_root"].copy()
+        # Upgrade installations that previously pinned every Codex process to
+        # the local relay. Per-invocation CLI routing remains available.
+        if managed.get("openai_base_url") != original.get("openai_base_url"):
+            managed["openai_base_url"] = original.get("openai_base_url")
+        fields = root_fields(current)
+        if "127.0.0.1:43191" in (fields.get("openai_base_url") or ""):
+            raise ValueError("global openai_base_url still targets router; remove it before enabling")
+        preserved = [key for key in MANAGED_KEYS if fields.get(key) != original.get(key)]
+        expected = {key: original.get(key) for key in MANAGED_KEYS if key not in preserved}
+        replacement = {key: managed.get(key) for key in expected}
+        updated = edit_root(current, expected, replacement)
         save_config(path, updated)
+        manifest["managed_root"] = managed
+        manifest["preserved_user_changes"] = preserved
         manifest["config_state"] = "enabled"
         write_json(root / "manifest.json", manifest)
     config = load_json(root / "config.json")

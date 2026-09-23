@@ -59,6 +59,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((self.root / "capability").stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(list((self.root / "backups").glob("*.toml"))), 1)
         self.assertIn('model = "jev-shadow"', self.config.read_text())
+        self.assertNotIn("openai_base_url", self.config.read_text())
         self.assertEqual(manage.load_json(self.root / "config.json")["fallback_model"], "gpt-6-sol")
         self.assertEqual(manage.load_json(self.root / "config.json")["auto_roles"], ["luna", "terra", "sol"])
         self.assertEqual(manage.load_json(self.root / "config.json")["auto_policy"], "completion_v2")
@@ -71,6 +72,24 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(os.readlink(self.codex), str(self.real))
         self.assertIn("search = false", self.config.read_text())
         self.assertNotIn("openai_base_url", self.config.read_text())
+
+    def test_enable_migrates_legacy_relay_url_and_preserves_manual_alias(self):
+        self.install()
+        manage.disable(self.root, stop=False)
+        manifest_path = self.root / "manifest.json"
+        manifest = manage.load_json(manifest_path)
+        manifest["managed_root"]["openai_base_url"] = 'openai_base_url = "http://127.0.0.1:43191/old"\n'
+        manage.write_json(manifest_path, manifest)
+        self.config.write_text(self.config.read_text().replace('model = "gpt-6-astra"',
+                                                        'model = "jev-auto"'))
+        manage.enable(self.root, start=False)
+        current = self.config.read_text()
+        self.assertIn('model = "jev-auto"', current)
+        self.assertIn('model_catalog_json = ', current)
+        self.assertNotIn("openai_base_url", current)
+        migrated = manage.load_json(manifest_path)
+        self.assertIsNone(migrated["managed_root"]["openai_base_url"])
+        self.assertIn("model", migrated["preserved_user_changes"])
 
     def test_desktop_runtime_distinguishes_direct_and_adapted_app_server(self):
         sample = """10 1 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
