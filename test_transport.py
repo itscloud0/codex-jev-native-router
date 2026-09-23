@@ -2,6 +2,7 @@ import http.client
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -196,8 +197,19 @@ class TransportTest(unittest.TestCase):
         path = f"/{CAPABILITY}/responses"
         self.assertEqual(self.request("POST", path, "{}", {"Authorization": "Bearer native", "Content-Length": str(transport.MAX_BODY + 1)})[0], 413)
         self.assertEqual(self.request("POST", path, "{}", {"Authorization": "Bearer native", "Transfer-Encoding": "chunked"})[0], 400)
-        for _ in range(self.server.max_inflight):
-            self.assertTrue(self.server.slots.acquire(blocking=False))
+        # The client can finish reading before the handler's finally releases its slot.
+        deadline = time.monotonic() + 2
+        while True:
+            acquired = 0
+            while acquired < self.server.max_inflight and self.server.slots.acquire(blocking=False):
+                acquired += 1
+            if acquired == self.server.max_inflight:
+                break
+            for _ in range(acquired):
+                self.server.slots.release()
+            if time.monotonic() >= deadline:
+                self.fail("request slots were not released")
+            time.sleep(0.01)
         try:
             self.assertEqual(self.request("POST", path, "{}", {"Authorization": "Bearer native"})[0], 503)
         finally:
