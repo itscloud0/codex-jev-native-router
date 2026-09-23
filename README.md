@@ -18,7 +18,7 @@ An explicit concrete model bypasses Auto. In Desktop, Jev Auto chooses **both** 
 
 Jev does not choose whether to spawn subagents or assign their models. Without a separate Codex subagent setting, a child inherits its parent's model and effort. [Codex supports personal custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents) in `~/.codex/agents/`; optional [explorer](examples/agents/explorer.toml) and [mechanical](examples/agents/mechanical.toml) examples use Luna/high for bounded searches and edits. They must be explicitly selected by the parent agent or guided by global `~/.codex/AGENTS.md` instructions. Do not set every child to Luna: substantive implementation and debugging may need Sol, and extra agents add their own context cost. No per-repository files are required for personal agents.
 
-The Desktop effort picker is Codex's native model-effort control, not an extensible routing-mode menu. An alias can advertise fewer supported efforts, but that does not supply custom route labels or guarantee the control disappears in every client. This project leaves native effort metadata intact and ignores the picker for Auto; use the router config for routing policy.
+The Desktop effort picker is Codex's native model-effort control, not an extensible routing-mode menu. Jev aliases now advertise a single effort to avoid presenting choices that Auto ignores. Desktop may still display `Medium`; it is only alias metadata, **not** the actual executor effort. `jev-codex route THREAD_UUID` shows the last routed model and effort. The full history is available with `jev-codex trace THREAD_UUID`. Use the router config for routing policy. A full Desktop restart is needed after a catalog change.
 
 The adapter changes only Codex app-server model/effort commands. Built-in tools such as image generation are separate calls; an image-tool HTTP error is not a route decision. Check the tool's own result before attributing it to this router.
 
@@ -78,7 +78,7 @@ Healthy CLI calls use a capability protected `/cli` gateway path so telemetry id
 
 ## Report
 
-`jev-codex report` aggregates recorded model, effort, token counts, cache tokens, route switches, failures, and Jev latency. To compare the observed mix against fixed all-Sol and all-Astra choices, supply your own relative weights:
+`jev-codex report` aggregates recorded model, effort, token counts, cache tokens, route switches, failures, and Jev latency. It also reports weak quality signals from Desktop: a failed prior turn, a concrete-model override after Auto, and nonzero command exits. A nonzero command exit is not necessarily a failed test or bad route. The adapter sends measured cache-read percentage, `hot`/`warming` state and age to Jev only for ten minutes after a native usage notification; no old cache reading is treated as current. To compare the observed mix against fixed all-Sol and all-Astra choices, supply your own relative weights:
 
 ```json
 {
@@ -97,7 +97,7 @@ Desktop integration uses the bundled app's implemented but undocumented `CODEX_C
 
 The Desktop wrapper adds a command-line override for the official ChatGPT Codex URL, so native app-server execution bypasses the local Responses relay. The adapter records allowlisted token counts from native `thread/tokenUsage/updated` notifications at turn completion. If Python or the adapter file is missing at startup, the wrapper starts bundled native Codex with the same direct URL and original Desktop arguments; concrete models remain usable. This does not cover an adapter failure after it starts. The CLI still uses the relay for telemetry and can be interrupted if that relay dies mid-request.
 
-`jev-codex status` includes `desktop.runtime.adapter_active` and `direct_native_app_server`, determined from the primary Desktop process's direct children without printing process arguments. This excludes standalone probes launched inside a Codex task. An installed override with `adapter_active=false` means the running Desktop backend has not adopted the adapter. Desktop may pass global `-c` flags before `app-server`; the adapter recognizes this argument order.
+`jev-codex status` includes `desktop.runtime.adapter_active` and `direct_native_app_server`, determined from the primary Desktop process's direct children without printing process arguments. This excludes standalone probes launched inside a Codex task. An installed override with `adapter_active=false` means the running Desktop backend has not adopted the adapter. Desktop may pass global `-c` flags before `app-server`; the adapter recognizes this argument order. After a Codex update, run `jev-codex doctor`: it checks the native binary, alias metadata against Sol, the local gateway, Desktop adapter adoption while Desktop is running, and installed model catalog against Codex's cache. This read-only check does not prove native execution or built-in tools; run one routed turn and an Image Gen smoke test after major updates.
 
 `desktop-disable` restores the owned environment and leaves CLI/relay enabled. Global `disable` and `rollback` also remove the Desktop override. A Desktop restart is required for environment changes to affect a running app. User changes to the environment or wrapper are preserved rather than silently overwritten.
 

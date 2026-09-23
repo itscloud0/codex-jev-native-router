@@ -73,6 +73,16 @@ class InstallTests(unittest.TestCase):
         self.assertIn("search = false", self.config.read_text())
         self.assertNotIn("openai_base_url", self.config.read_text())
 
+    def test_alias_advertises_one_effort_and_explains_auto(self):
+        native = {"models": [{"slug": "gpt-6-sol", "display_name": "Sol", "visibility": "list",
+                              "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"},
+                                                             {"effort": "high"}]}]}
+        aliases = {item["slug"]: item for item in manage.managed_catalog(native)["models"]
+                   if item["slug"].startswith("jev-")}
+        self.assertEqual(aliases["jev-auto"]["supported_reasoning_levels"], [{"effort": "medium"}])
+        self.assertIn("Jev chooses", aliases["jev-auto"]["description"])
+        self.assertEqual(aliases["jev-shadow"]["supported_reasoning_levels"], [{"effort": "medium"}])
+
     def test_enable_migrates_legacy_relay_url_and_preserves_manual_alias(self):
         self.install()
         manage.disable(self.root, stop=False)
@@ -342,6 +352,8 @@ class InstallTests(unittest.TestCase):
         self.assertIsNone(no_weights["counterfactual"]["actual_units"])
         self.assertEqual(no_weights["observed"]["calls"], 1)
         self.assertEqual(no_weights["observed"]["by_client"]["cli"]["input_tokens"], 100)
+        self.assertEqual(no_weights["observed"]["weak_quality_signals"], {
+            "prior_failed_turns": 0, "manual_overrides": 0, "nonzero_command_exits": 0})
         self.assertEqual(no_weights["routes"], {"decisions": 1, "switches": 1, "jev_ms": 25,
                                                  "proposed_models": {"gpt-6-astra": 1},
                                                  "by_policy": {"unknown": {"decisions": 1,
@@ -376,11 +388,35 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result["routes"][0]["reason"], "privacy_fallback")
         self.assertEqual(result["usage_events"], 1)
         self.assertEqual(result["executor_usage"]["gpt-6-sol/high"]["cached_input_tokens"], 60)
+        self.assertEqual(manage.route(thread_id, self.root)["model"], "gpt-6-sol")
+        self.assertEqual(manage.route(thread_id, self.root)["effort"], "high")
+        with (state / "telemetry.jsonl").open("a") as sink:
+            sink.write(json.dumps({"event": "usage", "session": digest[:24],
+                                   "model": "gpt-6-astra", "effort": "medium", "status": "ok"}) + "\n")
+        self.assertEqual((manage.route(thread_id, self.root)["model"],
+                          manage.route(thread_id, self.root)["source"]), ("gpt-6-astra", "usage"))
         self.assertNotIn("secret", json.dumps(result))
         self.assertNotIn("private", json.dumps(result))
         self.assertNotIn("astra", json.dumps(result))
         with self.assertRaisesRegex(ValueError, "UUID"):
             manage.trace("../config.json", self.root)
+
+    def test_doctor_detects_catalog_drift_without_changing_files(self):
+        self.install()
+        with mock.patch.object(manage, "status", return_value={"health": True, "desktop": {
+                "runtime": {"app_running": False, "adapter_active": False}}}):
+            before = (self.root / "models.json").read_bytes()
+            healthy = manage.doctor(self.root)
+            self.assertTrue(healthy["ok"])
+            self.assertEqual((self.root / "models.json").read_bytes(), before)
+            cache = manage.load_json(self.cache)
+            cache["models"][0]["description"] = "server copy changed"
+            manage.write_json(self.cache, cache)
+            self.assertTrue(manage.doctor(self.root)["checks"]["account_catalog_matches_installed"])
+            native = manage.load_json(self.root / "native-models.json")
+            native["models"][0]["model_messages"] = {"base_instructions": "changed"}
+            manage.write_json(self.root / "native-models.json", native)
+            self.assertFalse(manage.doctor(self.root)["checks"]["managed_aliases_match_native_sol"])
 
 
 if __name__ == "__main__":

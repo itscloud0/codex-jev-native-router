@@ -159,8 +159,10 @@ class Adapter:
         self.active: set[str] = set()
         self.actual: dict[str, tuple[str, str]] = {}
         self.last_context: dict[str, int] = {}
-        self.last_cache_pct: dict[str, int] = {}
+        self.last_cache_pct: dict[str, tuple[int, float]] = {}
         self.turn_usage: dict[tuple[str, str], dict] = {}
+        self.turn_signals: dict[str, dict] = {}
+        self.pending_override: dict[str, bool] = {}
 
     @staticmethod
     def _remember(mapping: dict, key: str, value: Any) -> None:
@@ -210,9 +212,14 @@ class Adapter:
             context = saved.get("context")
         if isinstance(context, int):
             payload["context_tokens"] = context
-        cached_pct = self.last_cache_pct.get(thread_id)
-        if isinstance(cached_pct, int):
-            payload["cached_input_pct"] = cached_pct
+        cached_sample = self.last_cache_pct.get(thread_id)
+        if isinstance(cached_sample, tuple) and len(cached_sample) == 2:
+            cached_pct, observed_at = cached_sample
+            age = time.monotonic() - observed_at
+            if isinstance(cached_pct, int) and 0 <= age <= 600:
+                payload["cached_input_pct"] = cached_pct
+                payload["cache_state"] = "hot" if cached_pct > 0 else "warming"
+                payload["cache_age_s"] = int(age)
         try:
             decision = self.router.decide(payload, client="desktop", session_id=thread_id,
                                           native_selection=True, mode_override="auto" if alias == "jev-auto" else "shadow")
@@ -275,6 +282,15 @@ class Adapter:
         config_model = config.get("model") if isinstance(config.get("model"), str) else None
         # Collaboration settings win in native Codex. Any concrete selection is manual.
         explicit = config_model or (collab_model if isinstance(collab_model, str) else top_model if isinstance(top_model, str) else None)
+        pending_manual = bool(self.pending_override.pop(thread_id, False)) if method == "turn/start" and thread_id else False
+        manual_override = bool(method == "turn/start" and (pending_manual or
+            (saved and saved.get("alias") in ALIASES and isinstance(explicit, str) and not _alias(explicit))))
+        prior_failed = bool(saved and saved.get("failed"))
+        if method == "thread/settings/update" and thread_id and saved and saved.get("alias") in ALIASES \
+                and isinstance(explicit, str) and not _alias(explicit):
+            self._remember(self.pending_override, thread_id, True)
+        elif method == "thread/settings/update" and thread_id and _alias(explicit):
+            self.pending_override.pop(thread_id, None)
         if method == "turn/start" and thread_id and isinstance(explicit, str) and not _alias(explicit):
             effort = (settings or {}).get("reasoning_effort") if isinstance(settings, dict) else None
             effort = effort if isinstance(effort, str) else params.get("effort")
@@ -306,6 +322,10 @@ class Adapter:
             return _encode(changed)
         if method == "turn/start":
             if not thread_id or not alias:
+                if thread_id and manual_override:
+                    self._remember(self.turn_signals, thread_id,
+                                   {"manual_override": True, "prior_failed": prior_failed,
+                                    "command_failures": 0})
                 if explicit and not _alias(explicit) and _alias(top_model):
                     changed = copy.deepcopy(message)
                     changed["params"]["model"] = explicit
@@ -314,6 +334,9 @@ class Adapter:
             if thread_id in self.active:
                 model, effort = self.actual.get(thread_id, (self._sol(), "medium"))
             else:
+                self._remember(self.turn_signals, thread_id,
+                               {"manual_override": False, "prior_failed": prior_failed,
+                                "command_failures": 0})
                 model, effort, _ = self._route(alias, params, thread_id, saved)
             changed = copy.deepcopy(message)
             changed["params"]["model"] = model
@@ -368,6 +391,13 @@ class Adapter:
         params = message.get("params")
         if isinstance(method, str) and isinstance(params, dict):
             thread_id = params.get("threadId")
+            if method == "item/completed" and isinstance(thread_id, str) and thread_id in self.active:
+                item = params.get("item")
+                if isinstance(item, dict) and item.get("type") == "commandExecution":
+                    exit_code = item.get("exitCode")
+                    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
+                        signals = self.turn_signals.setdefault(thread_id, {"command_failures": 0})
+                        signals["command_failures"] = min(255, signals.get("command_failures", 0) + 1)
             if method == "thread/started" and isinstance(params.get("thread"), dict):
                 changed = copy.deepcopy(message)
                 if self._mask_thread_model(changed["params"]["thread"]):
@@ -380,7 +410,8 @@ class Adapter:
                     self.store.update(thread_id, context=context)
                     cached = last.get("cachedInputTokens") if isinstance(last, dict) else None
                     if isinstance(cached, int) and not isinstance(cached, bool) and 0 <= cached <= context and context > 0:
-                        self._remember(self.last_cache_pct, thread_id, min(100, (cached * 100) // context))
+                        self._remember(self.last_cache_pct, thread_id,
+                                       (min(100, (cached * 100) // context), time.monotonic()))
                 turn_id = params.get("turnId")
                 if isinstance(turn_id, str) and isinstance(last, dict):
                     input_tokens, output_tokens = last.get("inputTokens"), last.get("outputTokens")
@@ -404,6 +435,7 @@ class Adapter:
                             "turn_hash": turn_id, "mode": "auto" if saved.get("alias") == "jev-auto" else
                             "shadow" if saved.get("alias") == "jev-shadow" else "native",
                             "reason": "concrete_model" if not saved.get("alias") else "lease"}
+                decision.update(self.turn_signals.pop(thread_id, {}))
                 status = "error" if failed else "cancelled" if isinstance(turn, dict) and turn.get("status") == "interrupted" else "ok"
                 self.router.record_usage(decision, usage, status)
             elif method == "thread/settings/updated" and isinstance(thread_id, str):
@@ -427,6 +459,7 @@ class Adapter:
         pending = self.pending.pop(rid, None) if rid else None
         if pending and pending["method"] == "turn/start" and "error" in message:
             self.active.discard(pending.get("thread"))
+            self.turn_signals.pop(pending.get("thread"), None)
         if not pending or "result" not in message or not isinstance(message["result"], dict):
             return raw
         result = message["result"]

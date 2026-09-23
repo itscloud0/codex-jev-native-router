@@ -146,6 +146,23 @@ def managed_catalog(native: dict) -> dict:
         alias = copy.deepcopy(sol)
         alias["slug"] = slug
         alias["display_name"] = name
+        alias["description"] = ("Jev chooses the execution model and reasoning effort; "
+                                "the displayed effort is not the execution effort."
+                                if slug == "jev-auto" else
+                                "Runs Sol/medium while recording Jev's proposed model and effort.")
+        # The alias is a selector, not an executor. Advertising Sol's whole
+        # effort ladder offers controls that Auto deliberately ignores.
+        advertised = [
+            level for level in sol.get("supported_reasoning_levels", [])
+            if isinstance(level, dict) and level.get("effort") == "medium"
+        ]
+        if not advertised:
+            advertised = [level for level in sol.get("supported_reasoning_levels", [])
+                          if isinstance(level, dict) and isinstance(level.get("effort"), str)][:1]
+        if not advertised:
+            raise ValueError("Sol has no supported reasoning levels")
+        alias["default_reasoning_level"] = advertised[0]["effort"]
+        alias["supported_reasoning_levels"] = advertised
         models.append(alias)
     return {"models": models}
 
@@ -711,6 +728,41 @@ def status(root: Path = ROOT) -> dict:
     }
 
 
+def doctor(root: Path = ROOT) -> dict:
+    """Read-only compatibility checks after a Codex or Desktop update."""
+    current = status(root)
+    manifest = load_json(root / "manifest.json")
+    native = native_catalog(root / "native-models.json")
+    managed = load_json(root / "models.json")
+    expected = managed_catalog(native)
+    aliases = {item.get("slug"): item for item in managed.get("models", [])
+               if isinstance(item, dict) and item.get("slug") in ("jev-auto", "jev-shadow")}
+    expected_aliases = {item["slug"]: item for item in expected["models"]
+                        if item.get("slug") in ("jev-auto", "jev-shadow")}
+    native_binary = Path(manifest.get("native_target", ""))
+    checks = {
+        "native_binary_executable": native_binary.is_file() and os.access(native_binary, os.X_OK),
+        "managed_aliases_match_native_sol": aliases == expected_aliases,
+        "gateway_healthy": current["health"],
+        "desktop_adapter_active": (not current["desktop"]["runtime"]["app_running"]
+                                  or current["desktop"]["runtime"]["adapter_active"]),
+    }
+    cache = Path(manifest.get("config_path", "")).parent / "models_cache.json"
+    if cache.is_file():
+        try:
+            refreshed = native_catalog(cache)
+            # Server-side description copy changes often; only execution and
+            # capability metadata requires reinstalling a managed catalog.
+            def execution_view(catalog: dict) -> list[dict]:
+                return [{key: value for key, value in item.items() if key != "description"}
+                        for item in catalog["models"]]
+            checks["account_catalog_matches_installed"] = execution_view(refreshed) == execution_view(native)
+        except (OSError, ValueError, TypeError):
+            checks["account_catalog_matches_installed"] = False
+    return {"ok": all(checks.values()), "checks": checks,
+            "note": "Static and local-process checks only. A native routed turn and built-in tools still need a smoke test after updates."}
+
+
 def report(root: Path = ROOT, weights: dict | None = None) -> dict:
     path = root / "state/telemetry.jsonl"
     rows = []
@@ -748,7 +800,7 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
     by_policy: dict[str, dict] = {}
     jev_ms = 0
     for row in route_rows:
-        policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1") else "unknown"
+        policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2") else "unknown"
         policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {}})
         policy_bucket["decisions"] += 1
         proposed = row.get("proposed_model")
@@ -781,6 +833,14 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
     return {
         "observed": {"calls": len(usage_rows), "failures": failures,
                      "usage_missing_count": sum(row.get("usage_missing") is True for row in usage_rows),
+                     "weak_quality_signals": {
+                         "prior_failed_turns": sum(row.get("prior_failed") is True for row in usage_rows),
+                         "manual_overrides": sum(row.get("manual_override") is True for row in usage_rows),
+                         "nonzero_command_exits": sum(row.get("command_failures", 0) for row in usage_rows
+                                                      if isinstance(row.get("command_failures"), int)
+                                                      and not isinstance(row.get("command_failures"), bool)
+                                                      and 0 <= row["command_failures"] <= 255),
+                     },
                      "by_model": by_model, "by_client": by_client},
         "routes": {"decisions": len(route_rows), "switches": sum(row.get("switched") is True for row in route_rows),
                    "jev_ms": jev_ms, "proposed_models": proposals, "by_policy": by_policy},
@@ -806,6 +866,7 @@ def trace(thread_id: str, root: Path = ROOT) -> dict:
     routes = []
     usage: dict[str, dict] = {}
     usage_events = 0
+    last_executor: dict = {}
     path = root / "state/telemetry.jsonl"
     if path.exists():
         with path.open() as source:
@@ -831,9 +892,27 @@ def trace(thread_id: str, root: Path = ROOT) -> dict:
                         value = row.get(field)
                         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                             bucket[field] += value
+                if row.get("event") in ("route", "usage"):
+                    last_executor = {"model": row.get("model"), "effort": row.get("effort"),
+                                     "event": row.get("event"), "ts": row.get("ts"),
+                                     "status": row.get("status")}
     return {"thread_hash": session, "selection": intent, "routes": routes,
-            "usage_events": usage_events, "executor_usage": usage,
+            "usage_events": usage_events, "executor_usage": usage, "last_executor": last_executor,
             "note": "Usage events are model calls, not user turns. A native concrete_model usage reason does not override a preceding Auto route."}
+
+
+def route(thread_id: str, root: Path = ROOT) -> dict:
+    """Compact actual route for a Desktop thread, without task content."""
+    details = trace(thread_id, root)
+    observed = details["last_executor"]
+    selection = details["selection"]
+    return {"thread_hash": details["thread_hash"],
+            "selector": selection.get("alias"),
+            "model": observed.get("model") or selection.get("actual"),
+            "effort": observed.get("effort") or selection.get("effort"),
+            "source": observed.get("event") or "saved_selection",
+            "status": observed.get("status"),
+            "ts": observed.get("ts")}
 
 
 def _parse_cli(argv: list[str]) -> tuple[str, str | None, bool]:
@@ -1030,7 +1109,7 @@ def native_main() -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "report", "trace", "disable", "enable", "rollback", "update",
+    commands = {"install", "status", "doctor", "report", "trace", "route", "disable", "enable", "rollback", "update",
                 "desktop-enable", "desktop-disable"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1051,6 +1130,7 @@ def main() -> None:
             elif cmd == "rollback": rollback()
             elif cmd == "update": update_catalog()
             elif cmd == "status": print(json.dumps(status(), indent=2))
+            elif cmd == "doctor": print(json.dumps(doctor(), indent=2))
             elif cmd == "report":
                 if len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--weights"):
                     raise ValueError("usage: jev-codex report [--weights path.json]")
@@ -1060,6 +1140,10 @@ def main() -> None:
                 if len(argv) != 2:
                     raise ValueError("usage: jev-codex trace THREAD_UUID")
                 print(json.dumps(trace(argv[1]), indent=2))
+            elif cmd == "route":
+                if len(argv) != 2:
+                    raise ValueError("usage: jev-codex route THREAD_UUID")
+                print(json.dumps(route(argv[1]), indent=2))
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"jev-codex {cmd}: {exc}", file=sys.stderr)
             raise SystemExit(1)

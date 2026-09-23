@@ -249,6 +249,11 @@ class Router:
         cached_pct = payload.get("cached_input_pct")
         if policy != "baseline" and isinstance(cached_pct, int) and not isinstance(cached_pct, bool) and 0 <= cached_pct <= 100:
             state["cached_input_pct"] = cached_pct
+            if payload.get("cache_state") in ("hot", "warming"):
+                state["cache_state"] = payload["cache_state"]
+            age = payload.get("cache_age_s")
+            if isinstance(age, int) and not isinstance(age, bool) and 0 <= age <= 600:
+                state["cache_age_s"] = age
         requested_effort = payload.get("requested_effort")
         if requested_effort in EFFORTS:
             state["requested_effort"] = requested_effort
@@ -568,6 +573,9 @@ class Router:
             "cached_input_tokens": min(cached, input_tokens) if not usage_missing else None,
             "output_tokens": _bounded_int(usage.get("output_tokens")) if not usage_missing else None,
             "status": status if status in ("ok", "error", "cancelled") else "unknown",
+            "prior_failed": decision.get("prior_failed") is True,
+            "manual_override": decision.get("manual_override") is True,
+            "command_failures": min(_bounded_int(decision.get("command_failures")), 255),
         }
         try:
             self.telemetry_path.parent.mkdir(parents=True, exist_ok=True)

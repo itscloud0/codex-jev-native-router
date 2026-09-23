@@ -102,6 +102,11 @@ class AdapterTests(unittest.TestCase):
         self.adapter._route('jev-auto', {'input': [{'type': 'text', 'text': 'Fix the next typo'}]},
                             'thread-1', self.adapter.store.get('thread-1'))
         self.assertEqual(self.router.calls[-1][0]['cached_input_pct'], 25)
+        self.assertEqual(self.router.calls[-1][0]['cache_state'], 'hot')
+        self.adapter.last_cache_pct['thread-1'] = (25, rpc_adapter.time.monotonic() - 601)
+        self.adapter._route('jev-auto', {'input': [{'type': 'text', 'text': 'Fix another typo'}]},
+                            'thread-1', self.adapter.store.get('thread-1'))
+        self.assertNotIn('cached_input_pct', self.router.calls[-1][0])
         settings = {'jsonrpc': '2.0', 'method': 'thread/settings/updated', 'params': {'threadId': 'thread-1', 'threadSettings': {'model': 'gpt-6-luna', 'effort': 'low'}}}
         self.assertEqual(json.loads(self.adapter.server((json.dumps(settings)+'\n').encode()))['params']['threadSettings']['model'], 'jev-auto')
 
@@ -198,6 +203,33 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(observed['input_tokens'], 100)
         self.assertEqual(observed['input_tokens_details']['cached_tokens'], 40)
         self.assertNotIn('private prompt', json.dumps((decision, observed)))
+
+    def test_desktop_weak_quality_signals_are_counts_only(self):
+        self.adapter.store.update('t', alias='jev-auto', failed=True)
+        self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',
+                                                   'input': [{'type': 'text', 'text': 'private prompt'}]}))
+        failed_command = {'jsonrpc': '2.0', 'method': 'item/completed', 'params': {'threadId': 't',
+            'item': {'type': 'commandExecution', 'exitCode': 1, 'aggregatedOutput': 'private source'}}}
+        self.adapter.server((json.dumps(failed_command) + '\n').encode())
+        completed = {'jsonrpc': '2.0', 'method': 'turn/completed', 'params': {
+            'threadId': 't', 'turn': {'id': 'turn-1', 'status': 'completed'}}}
+        self.adapter.server((json.dumps(completed) + '\n').encode())
+        decision = self.router.usage_records[-1][0][0]
+        self.assertEqual((decision['prior_failed'], decision['command_failures']), (True, 1))
+        self.assertNotIn('private', json.dumps(decision))
+        self.adapter.store.update('m', alias='jev-auto')
+        self.adapter.client(request('turn/start', {'threadId': 'm', 'model': 'gpt-6-sol',
+                                                   'input': [{'type': 'text', 'text': 'manual'}]}))
+        self.adapter.server((json.dumps({**completed, 'params': {'threadId': 'm',
+            'turn': {'id': 'turn-2', 'status': 'completed'}}}) + '\n').encode())
+        self.assertTrue(self.router.usage_records[-1][0][0]['manual_override'])
+        self.adapter.store.update('s', alias='jev-auto')
+        self.adapter.client(request('thread/settings/update', {'threadId': 's', 'model': 'gpt-6-sol'}))
+        self.adapter.client(request('turn/start', {'threadId': 's', 'model': 'gpt-6-sol',
+                                                   'input': [{'type': 'text', 'text': 'continue'}]}))
+        self.adapter.server((json.dumps({**completed, 'params': {'threadId': 's',
+            'turn': {'id': 'turn-3', 'status': 'completed'}}}) + '\n').encode())
+        self.assertTrue(self.router.usage_records[-1][0][0]['manual_override'])
 
     def test_resume_persistence_unknown_context_and_fork(self):
         self.adapter.store.update('t', alias='jev-auto', actual='gpt-6-astra', effort='high', conservative=True)

@@ -199,9 +199,13 @@ class RouterTest(unittest.TestCase):
         self.assertIn("least costly role", self.calls[-1]["questions"]["capability"]["instructions"])
         cached_payload = payload("Change another variable")
         cached_payload["cached_input_pct"] = 55
+        cached_payload["cache_state"] = "hot"
+        cached_payload["cache_age_s"] = 12
         self.router.decide(cached_payload, session_id="cache", native_selection=True,
                            mode_override="shadow")
         self.assertEqual(self.calls[-1]["state"]["cached_input_pct"], 55)
+        self.assertEqual((self.calls[-1]["state"]["cache_state"],
+                          self.calls[-1]["state"]["cache_age_s"]), ("hot", 12))
         self.router.record_usage(shadow, None, "ok", event="route")
         record = json.loads((self.root / "telemetry.jsonl").read_text().splitlines()[-1])
         self.assertEqual(record["policy"], "completion_v1")
@@ -421,6 +425,8 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(set(roles), {"luna", "terra", "sol", "astra"})
         d = self.router.decide(payload("Write a short greeting"), native_selection=True)
         d["secret"] = "never-log-this"
+        d.update({"prior_failed": True, "manual_override": True, "command_failures": 2,
+                  "command_output": "private source"})
         self.router.record_usage(d, {"input_tokens": 100, "output_tokens": 20,
                                      "input_tokens_details": {"cached_tokens": 40}, "raw": "private"}, "ok")
         line = (self.root / "telemetry.jsonl").read_text()
@@ -428,6 +434,7 @@ class RouterTest(unittest.TestCase):
         self.assertNotIn("private", line)
         self.assertEqual(json.loads(line)["cached_input_tokens"], 40)
         self.assertEqual(json.loads(line)["event"], "usage")
+        self.assertEqual(json.loads(line)["command_failures"], 2)
         self.assertEqual(oct(os.stat(self.root / "telemetry.jsonl").st_mode & 0o777), "0o600")
 
     def test_route_event_is_allowlisted_and_distinct(self):
