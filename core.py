@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
@@ -423,7 +424,7 @@ class Router:
             else:
                 jev_started = time.monotonic()
                 try:
-                    deadline = min(max(float(config.get("timeout_seconds", 2)), 0.1), 2.0)
+                    deadline = min(max(float(config.get("timeout_seconds", 4)), 0.1), 4.0)
                     response = self.jev_client(body, deadline, Path(config.get("key_file", "~/.config/jev-codex-router/typesafe-api-key")))
                     candidate = self._answer(response, "capability")
                     candidate_effort = fixed_effort if fixed_effort in EFFORTS else self._answer(response, "effort")
@@ -439,12 +440,14 @@ class Router:
                             self._cache.pop(min(self._cache, key=lambda key: self._cache[key][0]), None)
                         self._failures[policy] = 0
                         reason = "jev"
-                except Exception:
+                except Exception as error:
                     self._failures[policy] += 1
                     if self._failures[policy] >= 3:
                         self._open_until[policy] = time.monotonic() + 60
                     candidate, candidate_effort = None, None
-                    reason = "jev_error"
+                    timed_out = isinstance(error, TimeoutError) or (
+                        isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError))
+                    reason = "jev_timeout" if timed_out else "jev_error"
                 jev_ms = _bounded_int(round((time.monotonic() - jev_started) * 1000))
             if candidate in roles and RANK[candidate] >= RANK[floor]:
                 proposed_role = candidate
@@ -465,7 +468,7 @@ class Router:
         context = payload.get("context_tokens")
         short = isinstance(context, int) and not isinstance(context, bool) and 0 <= context < 12000
         new_task = payload.get("jev_new_task") is True
-        uncertain_route = reason in ("jev_error", "invalid_decision", "circuit_open", "privacy_fallback", "fallback")
+        uncertain_route = reason in ("jev_error", "jev_timeout", "invalid_decision", "circuit_open", "privacy_fallback", "fallback")
         if previous_role == "astra" and uncertain_route:
             previous_role = None  # Jev failure must not silently continue spending Astra.
         if previous_role in roles and RANK[previous_role] > RANK[chosen_role] and (uncertain_route or not (new_task or (turns >= 3 and short))):
@@ -499,9 +502,9 @@ class Router:
             "policy": decision.get("policy") if decision.get("policy") in SHADOW_POLICIES else None,
             "reason": decision.get("reason") if decision.get("reason") in (
                 "concrete_model", "catalog_unavailable", "sol_catalog_unavailable", "cannot_route", "state_error",
-                "off", "lease", "fallback", "decision_cache", "jev", "jev_error", "invalid_decision", "privacy_fallback",
+                "off", "lease", "fallback", "decision_cache", "jev", "jev_error", "jev_timeout", "invalid_decision", "privacy_fallback",
                 "circuit_open", "lease_hysteresis", "requires_native_model_selection",
-                "shadow_fallback", "shadow_decision_cache", "shadow_jev", "shadow_jev_error", "shadow_invalid_decision",
+                "shadow_fallback", "shadow_decision_cache", "shadow_jev", "shadow_jev_error", "shadow_jev_timeout", "shadow_invalid_decision",
                 "shadow_privacy_fallback", "shadow_circuit_open", "shadow_lease_hysteresis",
             ) else None,
             "model": self._safe_model(decision.get("model")), "effort": decision.get("effort") if decision.get("effort") in EFFORTS else None,

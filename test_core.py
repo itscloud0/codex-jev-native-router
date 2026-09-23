@@ -76,6 +76,20 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(decision["jev_ms"], 2750)
         self.assertEqual(decision["router_ms"], 2750)
 
+    def test_jev_timeout_is_distinct_and_default_budget_is_four_seconds(self):
+        seen = []
+        def timeout_jev(body, timeout, key_file):
+            seen.append(timeout)
+            raise TimeoutError("no response")
+        router = self.new_router(timeout_jev)
+        decision = router.decide(payload("Change the button label text"),
+                                 native_selection=True, session_id="timeout-route")
+        self.assertEqual(seen, [4.0])
+        self.assertEqual(decision["reason"], "jev_timeout")
+        self.assertEqual(decision["model"], "gpt-6-sol")
+        router.record_usage(decision, None, "ok", event="route")
+        self.assertEqual(json.loads((self.root / "telemetry.jsonl").read_text())["reason"], "jev_timeout")
+
     def test_only_latest_real_user_and_no_raw_private_content(self):
         raw = "Fix the small label. secret=abcdef1234567890 https://internal.example/a/b person@example.com /private/repo/file.py ```python\nprint('hidden')\n```"
         p = {"model": "jev-auto", "input": [
@@ -100,6 +114,9 @@ class RouterTest(unittest.TestCase):
         self.assertNotIn("A" * 20, clean)
         self.assertEqual(sanitize_task("Please review this:\n-----BEGIN PRIVATE KEY-----\nPRIVATEBODY\n-----END PRIVATE KEY-----"), ("", True))
         self.assertEqual(sanitize_task("Fix this code:\ndef handler(req):\n    return req"), ("", True))
+        fenced, uncertain = sanitize_task("```text\nPrivate project instructions and source\n```\nPlease inspect this")
+        self.assertTrue(uncertain)
+        self.assertNotIn("Private project", fenced)
         self.assertEqual(latest_user_text({"input": [
             {"role": "user", "content": "Please fix the button"},
             {"role": "user", "content": "<environment_context>private host</environment_context>"},

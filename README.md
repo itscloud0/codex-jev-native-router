@@ -16,6 +16,8 @@ Local, owner-only Codex model router. Desktop uses a native app-server stdio ada
 
 An explicit concrete model bypasses Auto. An explicit effort change on an Auto thread overrides Jev's effort choice; if the chosen model cannot run that effort, the adapter may select Sol. The Desktop's initial Medium value is treated as a default, not a reliable explicit Medium override. If the task excerpt is unsafe or unsuitable to send to Jev, the router uses Sol without calling Jev (`privacy_fallback`). Shadow only records a proposal while Sol executes. This is **model/effort routing**, not automatic subagent orchestration.
 
+Jev has a four-second socket timeout by default. A timeout is recorded as `jev_timeout` and falls back to Sol; other provider failures are `jev_error`. The longer timeout avoids discarding valid decisions from occasional 2–4 second responses, at the cost of waiting up to four seconds on a failed call. A running Desktop adapter needs a full Desktop restart to load Python code updates.
+
 To see what happened on one task, run `jev-codex trace THREAD_UUID`. It shows the logical picker alias, actual executor, route reason, Jev latency and token metadata without printing prompts or source. A `concrete_model` reason on later usage events describes the native executor call; it does not mean a preceding Auto route was manual. The aggregate `jev-codex report` cannot establish quality-equivalent savings or ChatGPT Pro allowance debits.
 
 ## Install and controls
