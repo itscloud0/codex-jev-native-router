@@ -291,6 +291,8 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     config = {
         "mode": "shadow",
         "auto_roles": ["luna", "terra", "sol"],
+        "auto_policy": "completion_v2",
+        "large_context_sol_floor_tokens": 48000,
         "shadow_policy": "completion_v1",
         "effort_policy": "jev",
         "fixed_effort": "medium",
@@ -641,6 +643,7 @@ def status(root: Path = ROOT) -> dict:
     effort_policy = config.get("effort_policy") if config.get("effort_policy") in ("jev", "fixed") else "jev"
     fixed_effort = config.get("fixed_effort") if config.get("fixed_effort") in ("low", "medium", "high", "xhigh", "max", "ultra") else "medium"
     shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1", "completion_v2") else "baseline"
+    auto_policy = config.get("auto_policy") if config.get("auto_policy") in ("baseline", "completion_v1", "completion_v2") else "baseline"
     catalog = load_json(root / "models.json")
     process: dict = {"pid": None, "rss_kib": None, "elapsed": None}
     try:
@@ -677,7 +680,9 @@ def status(root: Path = ROOT) -> dict:
         "policy": {"config_file": str(root / "config.json"), "auto_roles": auto_roles,
                    "effort_policy": effort_policy,
                    "fixed_effort": fixed_effort,
+                   "auto_policy": auto_policy,
                    "shadow_policy": shadow_policy,
+                   "large_context_sol_floor_tokens": config.get("large_context_sol_floor_tokens", 48000),
                    "astra_auto_allowed": "astra" in auto_roles},
         "port": config["port"], "catalog_models": len(catalog["models"]),
         "models": [x.get("slug") for x in catalog["models"] if x.get("slug", "").startswith("jev-")],

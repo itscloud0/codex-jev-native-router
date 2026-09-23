@@ -33,6 +33,8 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(_floor("Сделай миграцию схемы данных"), "astra")
         self.assertEqual(_floor("Найди сложную ошибку в интеграции"), "sol")
         self.assertEqual(_floor("Переименуй локальную переменную"), "luna")
+        self.assertEqual(_floor("Во время изменений идут реальные заявки"), "astra")
+        self.assertEqual(_floor("Real customer orders are arriving"), "astra")
 
     def test_jev_request_uses_explicit_client_user_agent(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -52,7 +54,8 @@ class RouterTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / "catalog.json").write_text(json.dumps(catalog()))
-        (self.root / "config.json").write_text(json.dumps({"mode": "auto", "key_file": str(self.root / "missing-key")}))
+        (self.root / "config.json").write_text(json.dumps({"mode": "auto", "auto_policy": "baseline",
+                                                           "key_file": str(self.root / "missing-key")}))
         self.calls = []
 
         def jev(body, timeout, key_file):
@@ -235,6 +238,46 @@ class RouterTest(unittest.TestCase):
                                  session_id="invalid-joint", native_selection=True)
         self.assertEqual((decision["model"], decision["reason"]),
                          ("gpt-6-sol", "shadow_invalid_decision"))
+
+    def test_joint_auto_keeps_sol_floor_for_large_context_and_selects_effort(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v2"
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(body)
+            criteria = body["questions"]["route"]["criteria"]
+            return {"answers": {"route": {"choice": "sol:high" if "sol:high" in criteria and len(criteria) <= 3 else "luna:low"}}}
+        router = self.new_router(choose)
+        long_task = payload("Continue the implementation", context_tokens=100_312)
+        long_result = router.decide(long_task, session_id="long-task", native_selection=True)
+        self.assertEqual((long_result["model"], long_result["effort"], long_result["policy"]),
+                         ("gpt-6-sol", "high", "completion_v2"))
+        self.assertEqual(set(key.split(":")[0] for key in seen[0]["questions"]["route"]["criteria"]), {"sol"})
+        short_result = router.decide(payload("Rename a test variable", context_tokens=500),
+                                     session_id="short-task", native_selection=True)
+        self.assertEqual((short_result["model"], short_result["effort"]), ("gpt-6-luna", "low"))
+
+    def test_returning_from_manual_sol_does_not_reuse_stale_luna_lease(self):
+        first = self.router.decide(payload("Rename a test variable"),
+                                   session_id="manual-return", native_selection=True)
+        self.assertEqual(first["model"], "gpt-6-luna")
+        next_request = payload("Continue the task", context_tokens=500)
+        next_request["current_model"] = "gpt-6-sol"
+        after_manual = self.router.decide(next_request, session_id="manual-return", native_selection=True)
+        self.assertEqual((after_manual["model"], after_manual["reason"]),
+                         ("gpt-6-sol", "lease_hysteresis"))
+
+    def test_live_orders_require_sol_and_high_effort_even_if_jev_underestimates(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v2"
+        config_path.write_text(json.dumps(config))
+        router = self.new_router(lambda *args: {"answers": {"route": {"choice": "sol:low"}}})
+        result = router.decide(payload("Нужно исправить защиту, пока идут реальные заявки"),
+                               session_id="live-orders", native_selection=True)
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
 
     def test_manual_effort_filters_auto_candidates_before_jev(self):
         catalog_path = self.root / "catalog.json"

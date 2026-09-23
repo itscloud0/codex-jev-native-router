@@ -194,23 +194,6 @@ class Adapter:
             return True
         return False
 
-    def _with_effort_override(self, model: str, effort: str, saved: dict | None) -> tuple[str, str]:
-        requested = (saved or {}).get("effort_override")
-        if requested not in ("low", "medium", "high", "xhigh", "max", "ultra"):
-            return model, effort
-        try:
-            roles = visible_roles(self.router._catalog())
-            available = next((role["efforts"] for role in roles.values() if role["slug"] == model), [])
-            if requested in available:
-                return model, requested
-            for role_name in ("sol",):
-                role = roles.get(role_name)
-                if role and requested in role["efforts"]:
-                    return role["slug"], requested
-        except Exception:
-            pass
-        return self._sol(), "medium"
-
     def _route(self, alias: str, params: dict, thread_id: str, saved: dict | None) -> tuple[str, str, dict | None]:
         # Only user text enters the policy. All other input types stay in the native request.
         parts = [item["text"] for item in params.get("input", [])
@@ -219,9 +202,9 @@ class Adapter:
         if saved and saved.get("failed"):
             text = "Previous turn failure. " + text
         payload = {"model": alias, "input": [{"role": "user", "content": [{"type": "input_text", "text": text}]}]}
-        requested_effort = (saved or {}).get("effort_override")
-        if requested_effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
-            payload["requested_effort"] = requested_effort
+        current = self.actual.get(thread_id)
+        if current and isinstance(current[0], str):
+            payload["current_model"] = current[0]
         context = self.last_context.get(thread_id)
         if context is None and saved:
             context = saved.get("context")
@@ -246,7 +229,6 @@ class Adapter:
                     if model.endswith(("-luna", "-terra")) or (isinstance(previous, str) and previous.endswith("-astra")):
                         model, effort = self._sol(), "medium"
                     decision = {**decision, "model": model, "effort": effort, "reason": "lease_hysteresis"}
-                model, effort = self._with_effort_override(model, effort, saved)
                 decision = {**decision, "model": model, "effort": effort}
                 self.router.record_usage(decision, None, "ok", event="route")
                 return model, effort, decision
@@ -256,10 +238,8 @@ class Adapter:
         if not previous and saved and isinstance(saved.get("actual"), str):
             previous = (saved["actual"], saved.get("effort") or "medium")
         if previous and previous[0].endswith("-sol"):
-            model, effort = self._with_effort_override(previous[0], previous[1], saved)
-            return model, effort, None
-        model, effort = self._with_effort_override(self._sol(), "medium", saved)
-        return model, effort, None
+            return previous[0], "medium", None
+        return self._sol(), "medium", None
 
     def _enabled(self) -> bool:
         try:
@@ -306,6 +286,10 @@ class Adapter:
                 self.store.update(thread_id, clear=True)
                 saved = None
         if explicit and not _alias(explicit) and thread_id:
+            if method == "thread/settings/update":
+                chosen_effort = params.get("effort")
+                self._remember(self.actual, thread_id,
+                               (explicit, chosen_effort if isinstance(chosen_effort, str) else "medium"))
             self.store.update(thread_id, clear=True)
             saved = None
         if not self._enabled() and alias:
@@ -340,7 +324,8 @@ class Adapter:
                 collab["settings"]["reasoning_effort"] = effort
             self._remember(self.actual, thread_id, (model, effort))
             self.active.add(thread_id)
-            self.store.update(thread_id, alias=alias, failed=False, actual=model, effort=effort, conservative=False)
+            self.store.update(thread_id, alias=alias, failed=False, actual=model, effort=effort,
+                              conservative=False, clear_effort_override=True)
             if rid and len(self.pending) < MAX_PENDING:
                 self.pending[rid] = {"method": method, "thread": thread_id, "alias": alias}
             return _encode(changed)
@@ -367,17 +352,12 @@ class Adapter:
             else:
                 changed["params"]["collaborationMode"]["settings"].pop("model", None)
         if rid and len(self.pending) < MAX_PENDING:
-            self.pending[rid] = {"method": method, "thread": thread_id, "alias": alias,
-                                 "requested_effort": config.get("model_reasoning_effort")}
+            self.pending[rid] = {"method": method, "thread": thread_id, "alias": alias}
         if thread_id and method == "thread/settings/update":
             requested = params.get("effort")
-            override = requested if requested in ("low", "medium", "high", "xhigh", "max", "ultra") and (
-                (saved and saved.get("alias") == alias and requested != saved.get("effort"))
-                or (not saved or saved.get("alias") != alias) and requested != "medium") else None
             self.store.update(thread_id, alias=alias, actual=initial,
                               effort=requested if isinstance(requested, str) else None,
-                              effort_override=override,
-                              clear_effort_override="effort" in params and requested is None)
+                              clear_effort_override=True)
         return _encode(changed)
 
     def server(self, raw: bytes) -> bytes:
@@ -469,7 +449,7 @@ class Adapter:
             conservative = pending["method"] == "thread/resume" and not isinstance((existing or {}).get("context"), int)
             self.store.update(new_thread, alias=alias, actual=actual,
                               effort=result.get("reasoningEffort"), conservative=conservative,
-                              effort_override=pending.get("requested_effort") if pending.get("requested_effort") != "medium" else None)
+                              clear_effort_override=True)
         if alias and pending["method"] in ("thread/start", "thread/resume", "thread/fork") and isinstance(result.get("model"), str):
             changed = copy.deepcopy(message)
             changed["result"]["model"] = alias

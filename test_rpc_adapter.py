@@ -127,36 +127,44 @@ class AdapterTests(unittest.TestCase):
         manual = json.loads(self.adapter.server(response(7, {'thread': {'id': 't', 'model': 'gpt-6-sol'}})))
         self.assertEqual(manual['result']['thread']['model'], 'gpt-6-sol')
 
-    def test_effort_picker_overrides_effort_without_losing_auto_model(self):
+    def test_auto_ignores_picker_effort_and_clears_legacy_override(self):
         self.router._catalog = lambda: {'models': [
             {'slug': 'gpt-6-luna', 'visibility': 'list', 'supported_reasoning_levels':
              [{'effort': x} for x in ('low', 'medium', 'high', 'max')]},
             {'slug': 'gpt-6-sol', 'visibility': 'list', 'supported_reasoning_levels':
              [{'effort': x} for x in ('low', 'medium', 'high', 'max', 'ultra')]}]}
-        self.adapter.store.update('t', alias='jev-auto', actual='gpt-6-sol', effort='medium')
+        self.adapter.store.update('t', alias='jev-auto', actual='gpt-6-sol', effort='medium', effort_override='max')
         changed = json.loads(self.adapter.client(request('thread/settings/update', {
             'threadId': 't', 'model': 'jev-auto', 'effort': 'high'}, 11)))
         self.assertEqual((changed['params']['model'], changed['params']['effort']), ('gpt-6-sol', 'high'))
-        self.assertEqual(self.adapter.store.get('t')['effort_override'], 'high')
+        self.assertNotIn('effort_override', self.adapter.store.get('t'))
         turn = json.loads(self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',
             'input': [{'type': 'text', 'text': 'simple task'}]}, 12)))
-        self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-luna', 'high'))
-        self.assertEqual(self.router.calls[-1][0]['requested_effort'], 'high')
+        self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-luna', 'low'))
+        self.assertNotIn('requested_effort', self.router.calls[-1][0])
         self.adapter.active.discard('t')
         self.adapter.client(request('thread/settings/update', {'threadId': 't', 'model': 'jev-auto', 'effort': 'ultra'}, 13))
         turn = json.loads(self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',
             'input': [{'type': 'text', 'text': 'simple task'}]}, 14)))
-        self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-sol', 'ultra'))
-        self.assertEqual(self.router.calls[-1][0]['requested_effort'], 'ultra')
+        self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-luna', 'low'))
+        self.assertNotIn('requested_effort', self.router.calls[-1][0])
         self.adapter.client(request('thread/settings/update', {'threadId': 't', 'model': 'jev-auto', 'effort': None}, 15))
         self.assertNotIn('effort_override', self.adapter.store.get('t'))
 
-    def test_initial_nondefault_effort_is_preserved_for_alias(self):
+    def test_initial_nondefault_effort_does_not_override_auto(self):
         raw = request('thread/start', {'model': 'jev-auto', 'config': {'model_reasoning_effort': 'high'}}, 10)
         self.adapter.client(raw)
         self.adapter.server(response(10, {'thread': {'id': 't', 'model': 'gpt-6-sol'},
                                           'model': 'gpt-6-sol', 'reasoningEffort': 'high'}))
-        self.assertEqual(self.adapter.store.get('t')['effort_override'], 'high')
+        self.assertNotIn('effort_override', self.adapter.store.get('t'))
+
+    def test_auto_receives_last_concrete_model_for_cache_continuity(self):
+        self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'gpt-6-sol',
+            'effort': 'max', 'input': [{'type': 'text', 'text': 'Manual work'}]}, 20))
+        self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',
+            'input': [{'type': 'text', 'text': 'Continue'}]}, 21))
+        self.assertEqual(self.router.calls[-1][0]['current_model'], 'gpt-6-sol')
+        self.assertNotIn('requested_effort', self.router.calls[-1][0])
 
     def test_manual_and_collaboration_precedence(self):
         self.adapter.store.update('t', alias='jev-auto')

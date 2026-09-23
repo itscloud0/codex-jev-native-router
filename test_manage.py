@@ -61,6 +61,7 @@ class InstallTests(unittest.TestCase):
         self.assertIn('model = "jev-shadow"', self.config.read_text())
         self.assertEqual(manage.load_json(self.root / "config.json")["fallback_model"], "gpt-6-sol")
         self.assertEqual(manage.load_json(self.root / "config.json")["auto_roles"], ["luna", "terra", "sol"])
+        self.assertEqual(manage.load_json(self.root / "config.json")["auto_policy"], "completion_v2")
         manage.disable(self.root, stop=False)
         self.assertNotIn("openai_base_url", self.config.read_text())
         self.assertIn('model = "gpt-6-astra"', self.config.read_text())

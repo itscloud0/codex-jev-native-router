@@ -154,7 +154,7 @@ def _effort(requested: str, model: dict) -> str:
 
 def _floor(task: str) -> str:
     text = task.lower()
-    if re.search(r"\b(security|vulnerabilit\w*|exploit\w*|authenticat\w*|authoriz\w*|permission\w*|secret\w*|migrat\w*|schema change|architectur\w*|data loss|production deploy|billing|безопасност\w*|уязвимост\w*|аутентификац\w*|авторизац\w*|секрет\w*|миграц\w*|архитектур\w*|биллинг\w*|оплат\w*|продакшн\w*)\b|\b(?:схем\w*|потер\w*)\s+данных\b", text):
+    if re.search(r"\b(security|vulnerabilit\w*|exploit\w*|authenticat\w*|authoriz\w*|permission\w*|secret\w*|migrat\w*|schema change|architectur\w*|data loss|production deploy|live customer|real customer orders|real orders|billing|безопасност\w*|уязвимост\w*|аутентификац\w*|авторизац\w*|секрет\w*|миграц\w*|архитектур\w*|биллинг\w*|оплат\w*|продакшн\w*)\b|\b(?:схем\w*|потер\w*)\s+данных\b|\b(?:реальн\w*|боев\w*)\s+заявк\w*\b", text):
         return "astra"
     if re.search(r"\b(complex|multi.file|cross.module|concurren\w*|race condition|distributed|debug\w*|failing|failure|error|refactor\w*|code review|integrat\w*|database|сложн\w*|многофайл\w*|конкурент\w*|отлад\w*|ошиб\w*|рефактор\w*|ревью|интеграц\w*)\b|\b(?:нескольк\w*\s+файл\w*|баз\w*\s+данных|гонк\w*\s+данных)\b", text):
         return "sol"
@@ -266,7 +266,7 @@ class Router:
         choices = {role: profiles[role] for role in ROLES if role in roles and RANK[role] >= RANK[floor]
                    and (requested_effort not in EFFORTS or requested_effort in roles[role]["efforts"])}
         if policy == "completion_v2":
-            efforts = (requested_effort,) if requested_effort in EFFORTS else ("low", "medium", "high", "xhigh")
+            efforts = (requested_effort,) if requested_effort in EFFORTS else ("low", "medium", "high", "xhigh", "max")
             depth = {"low": "small reasoning budget", "medium": "moderate reasoning budget",
                      "high": "substantial reasoning budget", "xhigh": "extended reasoning budget",
                      "max": "largest reasoning budget", "ultra": "maximum available reasoning budget"}
@@ -354,7 +354,8 @@ class Router:
         mode = mode_override if mode_override in ("auto", "shadow", "off") else "shadow" if native_model == "jev-shadow" else config.get("mode", "off")
         if mode not in ("auto", "shadow", "off"):
             mode = "off"
-        policy = config.get("shadow_policy") if mode == "shadow" and config.get("shadow_policy") in SHADOW_POLICIES else "baseline"
+        policy_key = "shadow_policy" if mode == "shadow" else "auto_policy"
+        policy = config.get(policy_key) if mode in ("auto", "shadow") and config.get(policy_key) in SHADOW_POLICIES else "baseline"
         identity = session_id or payload.get("prompt_cache_key") or payload.get("previous_response_id") or os.urandom(16).hex()
         session = _hash(str(identity)[:256])
         raw = latest_user_text(payload)
@@ -396,7 +397,21 @@ class Router:
                 lease = leases.get(session)
                 if lease and lease.get("policy", "baseline") != policy:
                     lease = None
-                decision = self._decide_alias(payload, mode, roles, base, task, uncertain, turn_hash, lease, config, start, native_selection, _floor(raw) if raw else "sol", policy)
+                current_model = payload.get("current_model") if native_selection else None
+                if isinstance(current_model, str) and (lease is None or lease.get("model") != current_model):
+                    current_role = next((role for role, info in roles.items() if info["slug"] == current_model), None)
+                    if current_role is None and any(info["slug"] == current_model for info in all_roles.values()):
+                        current_role = "sol"
+                    if current_role in roles:
+                        current_info = roles[current_role]
+                        lease = {"model": current_info["slug"], "role": current_role,
+                                 "effort": _effort("medium", current_info), "policy": policy,
+                                 "turn_hash": "", "turns": 0}
+                raw_floor = _floor(raw) if raw else "sol"
+                threshold = config.get("large_context_sol_floor_tokens", 48_000)
+                if isinstance(threshold, int) and not isinstance(threshold, bool) and threshold > 0 and _bounded_int(payload.get("context_tokens")) >= threshold:
+                    raw_floor = "sol" if RANK[raw_floor] < RANK["sol"] else raw_floor
+                decision = self._decide_alias(payload, mode, roles, base, task, uncertain, turn_hash, lease, config, start, native_selection, raw_floor, policy)
                 decision["policy"] = policy
                 decision.update({"session": session, "turn_hash": turn_hash})
                 if mode != "off" and decision["mode"] != "off":
