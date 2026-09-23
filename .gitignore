@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+config.json
+manifest.json
+capability
+secrets/
+typesafe-api-key
+*.pem
+*.key
+state/
+backups/
+*.jsonl
+native-models.json
+models.json
+.DS_Store

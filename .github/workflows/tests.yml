@@ -1,0 +1,15 @@
+name: tests
+on:
+  push:
+  pull_request:
+jobs:
+  unit:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python version
+        run: python3 --version
+      - name: Unit tests
+        run: python3 -m unittest discover -s . -p 'test_*.py' -q
+      - name: Compile runtime modules
+        run: python3 -m py_compile core.py manage.py rpc_adapter.py transport.py

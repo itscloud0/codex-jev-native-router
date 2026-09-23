@@ -1,0 +1,5 @@
+{
+  "auto_roles": ["luna", "terra", "sol"],
+  "effort_policy": "jev",
+  "fixed_effort": "medium"
+}
