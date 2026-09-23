@@ -95,6 +95,13 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn('thread-1', state.read_text())
         self.assertNotIn('typo', state.read_text())
         self.assertEqual(self.adapter.store.get('thread-1')['context'], 9000)
+        cached_usage = {'jsonrpc': '2.0', 'method': 'thread/tokenUsage/updated', 'params': {
+            'threadId': 'thread-1', 'tokenUsage': {'last': {'inputTokens': 10000,
+                                                          'cachedInputTokens': 2500, 'outputTokens': 100}}}}
+        self.adapter.server((json.dumps(cached_usage) + '\n').encode())
+        self.adapter._route('jev-auto', {'input': [{'type': 'text', 'text': 'Fix the next typo'}]},
+                            'thread-1', self.adapter.store.get('thread-1'))
+        self.assertEqual(self.router.calls[-1][0]['cached_input_pct'], 25)
         settings = {'jsonrpc': '2.0', 'method': 'thread/settings/updated', 'params': {'threadId': 'thread-1', 'threadSettings': {'model': 'gpt-6-luna', 'effort': 'low'}}}
         self.assertEqual(json.loads(self.adapter.server((json.dumps(settings)+'\n').encode()))['params']['threadSettings']['model'], 'jev-auto')
 

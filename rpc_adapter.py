@@ -159,6 +159,7 @@ class Adapter:
         self.active: set[str] = set()
         self.actual: dict[str, tuple[str, str]] = {}
         self.last_context: dict[str, int] = {}
+        self.last_cache_pct: dict[str, int] = {}
         self.turn_usage: dict[tuple[str, str], dict] = {}
 
     @staticmethod
@@ -223,6 +224,9 @@ class Adapter:
             context = saved.get("context")
         if isinstance(context, int):
             payload["context_tokens"] = context
+        cached_pct = self.last_cache_pct.get(thread_id)
+        if isinstance(cached_pct, int):
+            payload["cached_input_pct"] = cached_pct
         try:
             decision = self.router.decide(payload, client="desktop", session_id=thread_id,
                                           native_selection=True, mode_override="auto" if alias == "jev-auto" else "shadow")
@@ -391,6 +395,9 @@ class Adapter:
                 if isinstance(context, int) and not isinstance(context, bool) and context >= 0:
                     self._remember(self.last_context, thread_id, min(context, 1_000_000_000))
                     self.store.update(thread_id, context=context)
+                    cached = last.get("cachedInputTokens") if isinstance(last, dict) else None
+                    if isinstance(cached, int) and not isinstance(cached, bool) and 0 <= cached <= context and context > 0:
+                        self._remember(self.last_cache_pct, thread_id, min(100, (cached * 100) // context))
                 turn_id = params.get("turnId")
                 if isinstance(turn_id, str) and isinstance(last, dict):
                     input_tokens, output_tokens = last.get("inputTokens"), last.get("outputTokens")

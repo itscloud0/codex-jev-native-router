@@ -161,6 +161,47 @@ class RouterTest(unittest.TestCase):
         result = self.new_router(pick_terra).decide(payload("Implement a routine feature"), native_selection=True)
         self.assertEqual((result["model"], result["effort"]), ("gpt-6-terra", "high"))
 
+    def test_versioned_shadow_policy_isolated_from_auto(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["shadow_policy"] = "completion_v1"
+        config_path.write_text(json.dumps(config))
+        task = "Rename a local variable in the test"
+        shadow = self.router.decide(payload(task, "jev-shadow"), session_id="shared", native_selection=True)
+        self.assertEqual((shadow["model"], shadow["proposed_model"], shadow["policy"]),
+                         ("gpt-6-sol", "gpt-6-luna", "completion_v1"))
+        self.assertIn("retries, corrections", self.calls[-1]["questions"]["capability"]["instructions"])
+        self.assertNotIn("astra", self.calls[-1]["questions"]["capability"]["criteria"])
+        auto = self.router.decide(payload(task), session_id="shared", native_selection=True,
+                                  mode_override="auto")
+        self.assertEqual((auto["model"], auto["policy"], auto["reason"]),
+                         ("gpt-6-luna", "baseline", "jev"))
+        self.assertIn("least costly role", self.calls[-1]["questions"]["capability"]["instructions"])
+        cached_payload = payload("Change another variable")
+        cached_payload["cached_input_pct"] = 55
+        self.router.decide(cached_payload, session_id="cache", native_selection=True,
+                           mode_override="shadow")
+        self.assertEqual(self.calls[-1]["state"]["cached_input_pct"], 55)
+        self.router.record_usage(shadow, None, "ok", event="route")
+        record = json.loads((self.root / "telemetry.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(record["policy"], "completion_v1")
+
+    def test_shadow_circuit_failure_does_not_disable_auto(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["shadow_policy"] = "completion_v1"
+        config_path.write_text(json.dumps(config))
+        router = self.new_router(lambda *args: (_ for _ in ()).throw(OSError("down")))
+        for index in range(3):
+            router.decide(payload(f"Rename a test variable {index}", "jev-shadow"),
+                          session_id=f"shadow-{index}", native_selection=True)
+        self.assertGreater(router._open_until["completion_v1"], 0)
+        self.assertEqual(router._open_until["baseline"], 0)
+        router.jev_client = self.jev
+        auto = router.decide(payload("Rename another test variable"), session_id="auto",
+                             native_selection=True, mode_override="auto")
+        self.assertEqual((auto["reason"], auto["model"]), ("jev", "gpt-6-luna"))
+
     def test_native_selection_and_proxy_gate(self):
         p = payload("Write a short greeting")
         native = self.router.decide(p, session_id="native", native_selection=True)

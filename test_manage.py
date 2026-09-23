@@ -323,7 +323,9 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(no_weights["observed"]["calls"], 1)
         self.assertEqual(no_weights["observed"]["by_client"]["cli"]["input_tokens"], 100)
         self.assertEqual(no_weights["routes"], {"decisions": 1, "switches": 1, "jev_ms": 25,
-                                                 "proposed_models": {"gpt-6-astra": 1}})
+                                                 "proposed_models": {"gpt-6-astra": 1},
+                                                 "by_policy": {"unknown": {"decisions": 1,
+                                                                            "proposed_models": {"gpt-6-astra": 1}}}})
         weights = {"gpt-6-sol": {"input": 1, "cached_input": 0.5, "output": 2},
                    "gpt-6-astra": {"input": 2, "cached_input": 1, "output": 4}}
         result = manage.report(self.root, weights)

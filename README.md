@@ -34,12 +34,15 @@ Edit `~/.local/share/jev-codex-router/config.json` (owner-only), then restart th
 ```json
 {
   "auto_roles": ["luna", "terra", "sol"],
+  "shadow_policy": "completion_v1",
   "effort_policy": "jev",
   "fixed_effort": "medium"
 }
 ```
 
 `auto_roles` is the executor allowlist and must include Sol. Add `"astra"` to let Jev choose Astra automatically, without a confirmation window; the default excludes it. Jev chooses only from roles available in the authenticated Codex model catalog and permitted by this list. High-risk work has a Sol floor and at least high effort; Jev may upgrade it to Astra when Astra is allowed. If Jev fails, the route falls back to Sol rather than spending Astra. `effort_policy` is `jev` or `fixed`; `fixed_effort` accepts `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. A manual effort choice in Desktop or `codex --jev-auto -c model_reasoning_effort=high "task"` overrides automatic effort. A concrete model choice overrides routing and the allowlist.
+
+`shadow_policy` selects the experimental proposal policy for Jev Shadow: `baseline` or `completion_v1`. Jev Auto deliberately stays on `baseline`. `completion_v1` asks Jev to account for retries, corrections, context rebuilding, model capability, and measured prior-turn cached-input percentage where available. It does not send prompts, source or tool output. On a 48-case privacy-bounded historical replay, the policies agreed on only 9 model proposals; `completion_v1` proposed Sol on 26 cases versus 4 for `baseline`. Those first-turn cases have no trustworthy outcome labels, so the candidate has **not** been promoted to Auto. The route report groups proposals by policy. This policy was adapted from ideas in [0xNatoshi/jev-codex-router](https://github.com/0xNatoshi/jev-codex-router) under its MIT license; no source module was copied.
 
 CLI calls with a visible initial prompt run in auto mode by default. `--jev-shadow` forces a Sol execution and records the proposed route. `--jev-auto` explicitly routes. `--jev-off` uses the native bypass. Manual `-m`/`--model`, `-c model=...`, and profile choices take precedence. A bare interactive `codex` starts on Sol; use `/model` for later manual changes. `codex exec resume` preserves its saved model, without reconstructing or reclassifying the old thread. A prompt supplied as `-` passes stdin untouched and starts on Sol. The wrapper does not reroute turns inside the native TUI. CLI calls use the native bypass if the local gateway is unavailable.
 

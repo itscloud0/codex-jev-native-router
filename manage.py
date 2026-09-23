@@ -290,6 +290,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     config = {
         "mode": "shadow",
         "auto_roles": ["luna", "terra", "sol"],
+        "shadow_policy": "completion_v1",
         "effort_policy": "jev",
         "fixed_effort": "medium",
         "fallback_model": sol,
@@ -638,6 +639,7 @@ def status(root: Path = ROOT) -> dict:
         auto_roles = ["luna", "terra", "sol"]
     effort_policy = config.get("effort_policy") if config.get("effort_policy") in ("jev", "fixed") else "jev"
     fixed_effort = config.get("fixed_effort") if config.get("fixed_effort") in ("low", "medium", "high", "xhigh", "max", "ultra") else "medium"
+    shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1") else "baseline"
     catalog = load_json(root / "models.json")
     process: dict = {"pid": None, "rss_kib": None, "elapsed": None}
     try:
@@ -674,6 +676,7 @@ def status(root: Path = ROOT) -> dict:
         "policy": {"config_file": str(root / "config.json"), "auto_roles": auto_roles,
                    "effort_policy": effort_policy,
                    "fixed_effort": fixed_effort,
+                   "shadow_policy": shadow_policy,
                    "astra_auto_allowed": "astra" in auto_roles},
         "port": config["port"], "catalog_models": len(catalog["models"]),
         "models": [x.get("slug") for x in catalog["models"] if x.get("slug", "").startswith("jev-")],
@@ -719,11 +722,17 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         bucket["efforts"][effort] = bucket["efforts"].get(effort, 0) + 1
         failures += row.get("status") in ("failed", "error")
     proposals: dict[str, int] = {}
+    by_policy: dict[str, dict] = {}
     jev_ms = 0
     for row in route_rows:
+        policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1") else "unknown"
+        policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {}})
+        policy_bucket["decisions"] += 1
         proposed = row.get("proposed_model")
         if isinstance(proposed, str):
             proposals[proposed] = proposals.get(proposed, 0) + 1
+            policy_models = policy_bucket["proposed_models"]
+            policy_models[proposed] = policy_models.get(proposed, 0) + 1
         value = row.get("jev_ms")
         if isinstance(value, (int, float)) and value >= 0:
             jev_ms += value
@@ -751,7 +760,7 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
                      "usage_missing_count": sum(row.get("usage_missing") is True for row in usage_rows),
                      "by_model": by_model, "by_client": by_client},
         "routes": {"decisions": len(route_rows), "switches": sum(row.get("switched") is True for row in route_rows),
-                   "jev_ms": jev_ms, "proposed_models": proposals},
+                   "jev_ms": jev_ms, "proposed_models": proposals, "by_policy": by_policy},
         "counterfactual": comparison,
         "note": "Token-hold-constant comparisons are sensitivity estimates, not Pro cost or quality-equivalent savings.",
     }
