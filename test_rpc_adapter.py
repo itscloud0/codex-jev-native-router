@@ -141,11 +141,13 @@ class AdapterTests(unittest.TestCase):
         turn = json.loads(self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',
             'input': [{'type': 'text', 'text': 'simple task'}]}, 12)))
         self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-luna', 'high'))
+        self.assertEqual(self.router.calls[-1][0]['requested_effort'], 'high')
         self.adapter.active.discard('t')
         self.adapter.client(request('thread/settings/update', {'threadId': 't', 'model': 'jev-auto', 'effort': 'ultra'}, 13))
         turn = json.loads(self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',
             'input': [{'type': 'text', 'text': 'simple task'}]}, 14)))
         self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-sol', 'ultra'))
+        self.assertEqual(self.router.calls[-1][0]['requested_effort'], 'ultra')
         self.adapter.client(request('thread/settings/update', {'threadId': 't', 'model': 'jev-auto', 'effort': None}, 15))
         self.assertNotIn('effort_override', self.adapter.store.get('t'))
 

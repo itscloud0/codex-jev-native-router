@@ -203,6 +203,56 @@ class RouterTest(unittest.TestCase):
         record = json.loads((self.root / "telemetry.jsonl").read_text().splitlines()[-1])
         self.assertEqual(record["policy"], "completion_v1")
 
+    def test_joint_shadow_route_uses_only_supported_pairs_and_preserves_auto(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["shadow_policy"] = "completion_v2"
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(body)
+            return {"answers": {"route": {"choice": "terra:high"}}}
+        router = self.new_router(choose)
+        request = payload("Implement a bounded feature", "jev-shadow")
+        request["requested_effort"] = "high"
+        shadow = router.decide(request, session_id="joint", native_selection=True)
+        self.assertEqual((shadow["model"], shadow["proposed_model"], shadow["proposed_effort"], shadow["policy"]),
+                         ("gpt-6-sol", "gpt-6-terra", "high", "completion_v2"))
+        self.assertEqual(set(seen[0]["questions"]), {"route"})
+        self.assertEqual(set(seen[0]["questions"]["route"]["criteria"]),
+                         {"luna:high", "terra:high", "sol:high"})
+        self.assertEqual(seen[0]["state"]["requested_effort"], "high")
+        auto = self.router.decide(payload("Rename a test variable"), session_id="auto", native_selection=True)
+        self.assertEqual((auto["model"], auto["policy"]), ("gpt-6-luna", "baseline"))
+
+    def test_joint_shadow_rejects_unavailable_pair_without_execution_change(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["shadow_policy"] = "completion_v2"
+        config_path.write_text(json.dumps(config))
+        router = self.new_router(lambda *args: {"answers": {"route": {"choice": "astra:ultra"}}})
+        decision = router.decide(payload("Rename a test variable", "jev-shadow"),
+                                 session_id="invalid-joint", native_selection=True)
+        self.assertEqual((decision["model"], decision["reason"]),
+                         ("gpt-6-sol", "shadow_invalid_decision"))
+
+    def test_manual_effort_filters_auto_candidates_before_jev(self):
+        catalog_path = self.root / "catalog.json"
+        data = json.loads(catalog_path.read_text())
+        for model in data["models"]:
+            if model.get("slug") == "gpt-6-sol":
+                model["supported_reasoning_levels"].append({"effort": "ultra"})
+        catalog_path.write_text(json.dumps(data))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(body)
+            return {"answers": {"capability": {"choice": "sol"}}}
+        request = payload("Implement a bounded feature")
+        request["requested_effort"] = "ultra"
+        result = self.new_router(choose).decide(request, session_id="manual-ultra", native_selection=True)
+        self.assertEqual(set(seen[0]["questions"]["capability"]["criteria"]), {"sol"})
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "ultra"))
+
     def test_shadow_circuit_failure_does_not_disable_auto(self):
         config_path = self.root / "config.json"
         config = json.loads(config_path.read_text())

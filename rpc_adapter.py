@@ -219,6 +219,9 @@ class Adapter:
         if saved and saved.get("failed"):
             text = "Previous turn failure. " + text
         payload = {"model": alias, "input": [{"role": "user", "content": [{"type": "input_text", "text": text}]}]}
+        requested_effort = (saved or {}).get("effort_override")
+        if requested_effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+            payload["requested_effort"] = requested_effort
         context = self.last_context.get(thread_id)
         if context is None and saved:
             context = saved.get("context")

@@ -640,7 +640,7 @@ def status(root: Path = ROOT) -> dict:
         auto_roles = ["luna", "terra", "sol"]
     effort_policy = config.get("effort_policy") if config.get("effort_policy") in ("jev", "fixed") else "jev"
     fixed_effort = config.get("fixed_effort") if config.get("fixed_effort") in ("low", "medium", "high", "xhigh", "max", "ultra") else "medium"
-    shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1") else "baseline"
+    shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1", "completion_v2") else "baseline"
     catalog = load_json(root / "models.json")
     process: dict = {"pid": None, "rss_kib": None, "elapsed": None}
     try:
