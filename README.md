@@ -10,6 +10,14 @@ on an undocumented Codex launch override and should be rechecked after updates.
 
 Local, owner-only Codex model router. Desktop uses a native app-server stdio adapter for model selection; its executor connects directly to the official ChatGPT Codex endpoint. The CLI wrapper chooses a concrete native model and effort before Codex builds its session and uses a loopback Responses gateway for usage telemetry. Authentication stays with the built-in Codex OpenAI provider. Jev receives only a bounded, sanitized task excerpt; its key is read from an owner-only file passed at install time or `~/.config/jev-codex-router/typesafe-api-key`. The gateway does not forward Codex bearer headers to Jev.
 
+## What Auto actually does
+
+`Jev Auto` is a picker alias, not an executor model. On each new Desktop user turn, the local policy checks the model allowlist, a bounded task excerpt, risk floor, prior route lease and context/cache hints. Jev normally proposes both a concrete model and reasoning effort. The policy validates them; Codex then executes the whole turn with that model, its native instructions, full conversation and existing ChatGPT login. Tool calls within the turn do not trigger another route. The CLI wrapper routes the initial prompt only; native interactive CLI and resumed turns are not automatically rerouted.
+
+An explicit concrete model bypasses Auto. An explicit effort change on an Auto thread overrides Jev's effort choice; if the chosen model cannot run that effort, the adapter may select Sol. The Desktop's initial Medium value is treated as a default, not a reliable explicit Medium override. If the task excerpt is unsafe or unsuitable to send to Jev, the router uses Sol without calling Jev (`privacy_fallback`). Shadow only records a proposal while Sol executes. This is **model/effort routing**, not automatic subagent orchestration.
+
+To see what happened on one task, run `jev-codex trace THREAD_UUID`. It shows the logical picker alias, actual executor, route reason, Jev latency and token metadata without printing prompts or source. A `concrete_model` reason on later usage events describes the native executor call; it does not mean a preceding Auto route was manual. The aggregate `jev-codex report` cannot establish quality-equivalent savings or ChatGPT Pro allowance debits.
+
 ## Install and controls
 
 Run from this directory after reviewing `manage.py`, `core.py`, and `transport.py`:
@@ -18,6 +26,7 @@ Run from this directory after reviewing `manage.py`, `core.py`, and `transport.p
 /opt/homebrew/bin/python3 manage.py install --execution-binary /Applications/ChatGPT.app/Contents/Resources/codex --key-file /absolute/path/to/owner-only-typesafe-key
 jev-codex status
 jev-codex report
+jev-codex trace THREAD_UUID
 jev-codex desktop-enable
 jev-codex desktop-disable
 jev-codex disable
@@ -94,5 +103,7 @@ supports Claude Code as well as Codex. This implementation focuses on a direct
 Codex Desktop app-server adapter, one shared local policy for Desktop and CLI,
 and an explicit model allowlist. These are different tradeoffs, not a measured
 claim of better completion quality or quota savings.
+
+[Astra-Ares](https://github.com/miuuyy/Astra-Ares) adapts effort between model generations through a separately patched Codex CLI; it keeps the selected model fixed and does not integrate with this Desktop adapter. [pi-shift-router](https://github.com/green-dalii/pi-shift-router) combines tier routing, cache-aware thresholds and task-level subagent orchestration in Pi. [BitRouter](https://github.com/bitrouter/bitrouter) builds an outcome-driven proxy/control plane. Their ideas are useful for future evaluation, but their runtime and integration assumptions differ from native Codex Desktop. The backtest in `0xNatoshi/jev-codex-router` holds token counts fixed under alternative models, so it estimates API-equivalent spend rather than proven completion quality or Pro allowance savings.
 
 MIT licensed. Contributions and reproducible outcome measurements are welcome.

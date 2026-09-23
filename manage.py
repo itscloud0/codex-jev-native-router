@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -766,6 +767,53 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
     }
 
 
+def trace(thread_id: str, root: Path = ROOT) -> dict:
+    """Explain one thread using only hashed, allowlisted local metadata."""
+    if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", thread_id):
+        raise ValueError("thread ID must be a UUID")
+    digest = hashlib.sha256(thread_id.lower().encode()).hexdigest()
+    session = digest[:24]
+    intent = {}
+    try:
+        entry = load_json(root / "state/desktop-intent.json").get(digest[:32], {})
+        if isinstance(entry, dict):
+            intent = {key: entry[key] for key in ("alias", "actual", "effort", "effort_override")
+                      if key in entry and isinstance(entry[key], str)}
+    except (OSError, ValueError, TypeError):
+        pass
+    routes = []
+    usage: dict[str, dict] = {}
+    usage_events = 0
+    path = root / "state/telemetry.jsonl"
+    if path.exists():
+        with path.open() as source:
+            for line in source:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict) or row.get("session") != session:
+                    continue
+                if row.get("event") == "route":
+                    routes.append({key: row.get(key) for key in
+                                   ("ts", "client", "mode", "policy", "model", "effort",
+                                    "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms")})
+                    routes = routes[-64:]
+                elif row.get("event") == "usage":
+                    usage_events += 1
+                    key = str(row.get("model") or "unknown") + "/" + str(row.get("effort") or "unknown")
+                    bucket = usage.setdefault(key, {"calls": 0, "input_tokens": 0,
+                                                    "cached_input_tokens": 0, "output_tokens": 0})
+                    bucket["calls"] += 1
+                    for field in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                        value = row.get(field)
+                        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                            bucket[field] += value
+    return {"thread_hash": session, "selection": intent, "routes": routes,
+            "usage_events": usage_events, "executor_usage": usage,
+            "note": "Usage events are model calls, not user turns. A native concrete_model usage reason does not override a preceding Auto route."}
+
+
 def _parse_cli(argv: list[str]) -> tuple[str, str | None, bool]:
     """Return supported command, initial prompt, and explicit override flag."""
     command = "interactive"
@@ -960,7 +1008,7 @@ def native_main() -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "report", "disable", "enable", "rollback", "update",
+    commands = {"install", "status", "report", "trace", "disable", "enable", "rollback", "update",
                 "desktop-enable", "desktop-disable"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -986,6 +1034,10 @@ def main() -> None:
                     raise ValueError("usage: jev-codex report [--weights path.json]")
                 weights = load_json(Path(argv[2])) if len(argv) == 3 else None
                 print(json.dumps(report(weights=weights), indent=2))
+            elif cmd == "trace":
+                if len(argv) != 2:
+                    raise ValueError("usage: jev-codex trace THREAD_UUID")
+                print(json.dumps(trace(argv[1]), indent=2))
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"jev-codex {cmd}: {exc}", file=sys.stderr)
             raise SystemExit(1)

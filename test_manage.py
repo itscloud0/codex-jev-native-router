@@ -332,6 +332,36 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result["counterfactual"]["actual_units"], 110)
         self.assertEqual(result["counterfactual"]["all_astra_units"], 220)
 
+    def test_trace_explains_auto_route_without_prompt_data(self):
+        self.install()
+        thread_id = "01a0cbdf-57ca-7de2-b8f5-72b8c74a5568"
+        import hashlib
+        digest = hashlib.sha256(thread_id.encode()).hexdigest()
+        state = self.root / "state"
+        (state / "desktop-intent.json").write_text(json.dumps({digest[:32]: {
+            "alias": "jev-auto", "actual": "gpt-6-sol", "effort_override": "high",
+            "private": "must not appear"}}))
+        rows = [
+            {"event": "route", "session": digest[:24], "model": "gpt-6-sol", "effort": "high",
+             "reason": "privacy_fallback", "mode": "auto", "client": "desktop", "prompt": "secret"},
+            {"event": "usage", "session": digest[:24], "model": "gpt-6-sol", "effort": "high",
+             "input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 10},
+            {"event": "usage", "session": "another", "model": "gpt-6-astra", "effort": "max",
+             "input_tokens": 900, "output_tokens": 100},
+        ]
+        (state / "telemetry.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        result = manage.trace(thread_id, self.root)
+        self.assertEqual(result["selection"], {"alias": "jev-auto", "actual": "gpt-6-sol",
+                                                "effort_override": "high"})
+        self.assertEqual(result["routes"][0]["reason"], "privacy_fallback")
+        self.assertEqual(result["usage_events"], 1)
+        self.assertEqual(result["executor_usage"]["gpt-6-sol/high"]["cached_input_tokens"], 60)
+        self.assertNotIn("secret", json.dumps(result))
+        self.assertNotIn("private", json.dumps(result))
+        self.assertNotIn("astra", json.dumps(result))
+        with self.assertRaisesRegex(ValueError, "UUID"):
+            manage.trace("../config.json", self.root)
+
 
 if __name__ == "__main__":
     unittest.main()
