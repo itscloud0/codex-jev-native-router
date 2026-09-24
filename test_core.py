@@ -263,6 +263,26 @@ class RouterTest(unittest.TestCase):
                                      session_id="short-task", native_selection=True)
         self.assertEqual((short_result["model"], short_result["effort"]), ("gpt-6-luna", "low"))
 
+    def test_configured_context_floor_allows_medium_session_but_protects_long_session(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config.update(auto_policy="completion_v2", large_context_sol_floor_tokens=96_000)
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            criteria = body["questions"]["route"]["criteria"]
+            seen.append(set(criteria))
+            return {"answers": {"route": {"choice": "terra:medium" if "terra:medium" in criteria else "sol:medium"}}}
+        router = self.new_router(choose)
+        medium = router.decide(payload("Update a bounded parser", context_tokens=70_000),
+                               session_id="medium-context", native_selection=True)
+        long = router.decide(payload("Update a bounded parser", context_tokens=100_000),
+                             session_id="long-context", native_selection=True)
+        self.assertEqual((medium["model"], medium["effort"]), ("gpt-6-terra", "medium"))
+        self.assertEqual((long["model"], long["effort"]), ("gpt-6-sol", "medium"))
+        self.assertIn("terra:medium", seen[0])
+        self.assertEqual({choice.split(":")[0] for choice in seen[1]}, {"sol"})
+
     def test_returning_from_manual_sol_does_not_reuse_stale_luna_lease(self):
         first = self.router.decide(payload("Rename a test variable"),
                                    session_id="manual-return", native_selection=True)
