@@ -158,6 +158,17 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(self.request("GET", f"/{CAPABILITY}/cli/models?client_version=0.155.0",
                                       headers={"Authorization": "Bearer native"})[0], 200)
 
+    def test_cli_route_token_links_usage_to_wrapper_decision(self):
+        token = "a1b2c3d4e5f60708"
+        body = b'{"model":"gpt-6-sol","input":[]}'
+        headers = {"Authorization": "Bearer native", "Thread-Id": "native-thread"}
+        path = f"/{CAPABILITY}/cli/{token}"
+        self.assertEqual(self.request("GET", path + "/models", headers=headers)[0], 200)
+        self.assertEqual(self.request("POST", path + "/responses", body, headers)[0], 200)
+        self.assertEqual(self.router.calls[-1][1:3], ("cli", "cli-" + token))
+        self.assertEqual(self.router.records[-1][0]["client"], "cli")
+        self.assertEqual(self.request("POST", f"/{CAPABILITY}/cli/bad-token/responses", body, headers)[0], 404)
+
     def test_health_websocket_and_rejections(self):
         self.assertEqual(self.request("GET", "/health")[0], 200)
         self.assertEqual(self.request("GET", f"/{CAPABILITY}/responses", headers={"Upgrade": "websocket"})[0], 426)

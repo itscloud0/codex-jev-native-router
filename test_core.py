@@ -232,6 +232,48 @@ class RouterTest(unittest.TestCase):
         auto = self.router.decide(payload("Rename a test variable"), session_id="auto", native_selection=True)
         self.assertEqual((auto["model"], auto["policy"]), ("gpt-6-luna", "baseline"))
 
+    def test_joint_choice_receipt_is_bounded_and_survives_decision_cache(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["shadow_policy"] = "completion_v2"
+        config_path.write_text(json.dumps(config))
+        calls = []
+        def choose(body, timeout, key_file):
+            calls.append(body)
+            return {"model": "jev-1.13.0", "answers": {"route": {
+                "choice": "terra:medium", "confidence": 0.83,
+                "probabilities": {"terra:medium": 0.91, "sol:high": 0.09},
+                "private": "must not be logged"}}}
+        router = self.new_router(choose)
+        request = payload("Implement a bounded feature", "jev-shadow")
+        first = router.decide(request, session_id="receipt-a", native_selection=True)
+        second = router.decide(request, session_id="receipt-b", native_selection=True)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first["jev_confidence"], 0.83)
+        self.assertEqual(second["jev_selected_probability"], 0.91)
+        self.assertEqual(second["reason"], "shadow_decision_cache")
+        router.record_usage(first, None, "ok", event="route")
+        record = json.loads((self.root / "telemetry.jsonl").read_text())
+        self.assertEqual((record["jev_confidence"], record["jev_selected_probability"], record["jev_model"]),
+                         (0.83, 0.91, "jev-1.13.0"))
+        self.assertNotIn("private", json.dumps(record))
+
+    def test_malformed_choice_metrics_do_not_change_route_or_reach_telemetry(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v2"
+        config_path.write_text(json.dumps(config))
+        router = self.new_router(lambda *args: {"model": "untrusted model value", "answers": {"route": {
+            "choice": "terra:medium", "confidence": float("nan"),
+            "probabilities": {"terra:medium": 5.0}}}})
+        decision = router.decide(payload("Implement a bounded feature"), session_id="bad-metrics", native_selection=True)
+        self.assertEqual((decision["model"], decision["effort"]), ("gpt-6-terra", "medium"))
+        router.record_usage(decision, None, "ok", event="route")
+        record = json.loads((self.root / "telemetry.jsonl").read_text())
+        self.assertIsNone(record["jev_confidence"])
+        self.assertIsNone(record["jev_selected_probability"])
+        self.assertIsNone(record["jev_model"])
+
     def test_joint_shadow_rejects_unavailable_pair_without_execution_change(self):
         config_path = self.root / "config.json"
         config = json.loads(config_path.read_text())

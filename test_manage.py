@@ -151,7 +151,9 @@ class InstallTests(unittest.TestCase):
                 self.assertEqual(args[0], str(self.real))
                 self.assertEqual(args[1], "-c")
                 self.assertTrue(args[2].startswith('openai_base_url="http://127.0.0.1:43191/'))
-                self.assertTrue(args[2].endswith('/cli"'))
+                self.assertRegex(args[2], r'/cli/[0-9a-f]{16}"$')
+                token = args[2].rsplit('/', 1)[-1].rstrip('"')
+                self.assertEqual(decide.call_args.kwargs["session_id"], "cli-" + token)
                 self.assertEqual(args[3:7], ["-m", "gpt-6-sol", "-c", 'model_reasoning_effort="high"'])
                 self.assertIn("Fix tests", args)
                 self.assertEqual(decide.call_args.kwargs["mode_override"], "auto")
@@ -357,12 +359,26 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(no_weights["routes"], {"decisions": 1, "switches": 1, "jev_ms": 25,
                                                  "proposed_models": {"gpt-6-astra": 1},
                                                  "by_policy": {"unknown": {"decisions": 1,
-                                                                            "proposed_models": {"gpt-6-astra": 1}}}})
+                                                                            "proposed_models": {"gpt-6-astra": 1},
+                                                                            "confidence": {"samples": 0, "mean": None}}}})
         weights = {"gpt-6-sol": {"input": 1, "cached_input": 0.5, "output": 2},
                    "gpt-6-astra": {"input": 2, "cached_input": 1, "output": 4}}
         result = manage.report(self.root, weights)
         self.assertEqual(result["counterfactual"]["actual_units"], 110)
         self.assertEqual(result["counterfactual"]["all_astra_units"], 220)
+
+    def test_report_summarizes_valid_choice_confidence_without_assuming_quality(self):
+        self.install()
+        path = self.root / "state/telemetry.jsonl"
+        rows = [
+            {"event": "route", "policy": "completion_v2", "jev_confidence": 0.9},
+            {"event": "route", "policy": "completion_v2", "jev_confidence": 0.5},
+            {"event": "route", "policy": "completion_v2", "jev_confidence": "invalid"},
+        ]
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        bucket = manage.report(self.root)["routes"]["by_policy"]["completion_v2"]
+        self.assertEqual(bucket["decisions"], 3)
+        self.assertEqual(bucket["confidence"], {"samples": 2, "mean": 0.7})
 
     def test_trace_explains_auto_route_without_prompt_data(self):
         self.install()

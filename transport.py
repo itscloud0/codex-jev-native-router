@@ -248,11 +248,21 @@ class RouterHandler(BaseHTTPRequestHandler):
         path = self.path
         if "?" in self.path:
             return None
-        for prefix in ("/" + self.server.capability, "/" + self.server.capability + "/cli"):
+        prefixes = ["/" + self.server.capability, "/" + self.server.capability + "/cli"]
+        route_token = self._cli_route_token()
+        if route_token:
+            prefixes.append("/" + self.server.capability + "/cli/" + route_token)
+        for prefix in prefixes:
             for endpoint in ("/responses", "/responses/compact"):
                 if hmac.compare_digest(path, prefix + endpoint):
                     return endpoint
         return None
+
+    def _cli_route_token(self) -> str | None:
+        path = self.path.split("?", 1)[0]
+        match = re.fullmatch(r"/" + re.escape(self.server.capability) +
+                             r"/cli/([0-9a-f]{16})/(?:responses(?:/compact)?|models)", path)
+        return match.group(1) if match else None
 
     def _cli_path(self) -> bool:
         return self.path.startswith("/" + self.server.capability + "/cli/")
@@ -263,8 +273,11 @@ class RouterHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             return self._send(200, b'{"ok":true}')
         parts = urlsplit(self.path)
-        if any(hmac.compare_digest(parts.path, prefix + "/models") for prefix in
-               ("/" + self.server.capability, "/" + self.server.capability + "/cli")):
+        prefixes = ["/" + self.server.capability, "/" + self.server.capability + "/cli"]
+        route_token = self._cli_route_token()
+        if route_token:
+            prefixes.append("/" + self.server.capability + "/cli/" + route_token)
+        if any(hmac.compare_digest(parts.path, prefix + "/models") for prefix in prefixes):
             if parts.query and not re.fullmatch(r"client_version=[A-Za-z0-9._-]{1,64}", parts.query):
                 return self._send(400)
             return self._get_models(parts.query)
@@ -348,7 +361,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         if decoded is None:
             return self._send(415)
         client = "cli" if self._cli_path() else _client(self.headers)
-        session_id = self.headers.get("Thread-Id") or self.headers.get("Session-Id")
+        route_token = self._cli_route_token() if client == "cli" else None
+        session_id = "cli-" + route_token if route_token else self.headers.get("Thread-Id") or self.headers.get("Session-Id")
         rewritten, decision = _rewrite(decoded, self.server.router, client, session_id)
         if decision is not None:
             decision["client"] = client

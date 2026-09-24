@@ -6,6 +6,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -801,8 +802,13 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
     jev_ms = 0
     for row in route_rows:
         policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2") else "unknown"
-        policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {}})
+        policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {},
+                                                      "confidence_samples": 0, "confidence_total": 0.0})
         policy_bucket["decisions"] += 1
+        confidence = row.get("jev_confidence")
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and math.isfinite(confidence) and 0 <= confidence <= 1:
+            policy_bucket["confidence_samples"] += 1
+            policy_bucket["confidence_total"] += confidence
         proposed = row.get("proposed_model")
         if isinstance(proposed, str):
             proposals[proposed] = proposals.get(proposed, 0) + 1
@@ -811,6 +817,10 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         value = row.get("jev_ms")
         if isinstance(value, (int, float)) and value >= 0:
             jev_ms += value
+    for bucket in by_policy.values():
+        samples = bucket.pop("confidence_samples")
+        total = bucket.pop("confidence_total")
+        bucket["confidence"] = {"samples": samples, "mean": round(total / samples, 4) if samples else None}
     totals = {field: sum(row[field] for row in by_model.values()) for field in ("input_tokens", "cached_input_tokens", "output_tokens")}
     comparison: dict = {"token_hold_constant": totals, "weights_source": "none", "actual_units": None,
                         "all_sol_units": None, "all_astra_units": None}
@@ -880,7 +890,8 @@ def trace(thread_id: str, root: Path = ROOT) -> dict:
                 if row.get("event") == "route":
                     routes.append({key: row.get(key) for key in
                                    ("ts", "client", "mode", "policy", "model", "effort",
-                                    "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms")})
+                                    "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms",
+                                    "jev_confidence", "jev_selected_probability", "jev_model")})
                     routes = routes[-64:]
                 elif row.get("event") == "usage":
                     usage_events += 1
@@ -991,12 +1002,15 @@ def _custom_transport(argv: list[str]) -> bool:
     return False
 
 
-def _cli_endpoint_args(root: Path, config: dict) -> list[str]:
+def _cli_endpoint_args(root: Path, config: dict, route_token: str | None = None) -> list[str]:
     capability = Path(config["capability_file"]).read_text().strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,}", capability):
         raise ValueError("invalid local capability")
     port = int(config["port"])
-    return ["-c", "openai_base_url=" + toml_string(f"http://127.0.0.1:{port}/{capability}/cli")]
+    if route_token is not None and not re.fullmatch(r"[0-9a-f]{16}", route_token):
+        raise ValueError("invalid route token")
+    suffix = "/" + route_token if route_token else ""
+    return ["-c", "openai_base_url=" + toml_string(f"http://127.0.0.1:{port}/{capability}/cli{suffix}")]
 
 
 def _cli_effort_override(argv: list[str]) -> str | None:
@@ -1048,7 +1062,8 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
         router = Router(config_path=root / "config.json", catalog_path=root / "native-models.json",
                         state_path=root / "state/leases.json", telemetry_path=root / "state/telemetry.jsonl")
         requested_mode = "shadow" if mode_flag == "--jev-shadow" else "auto"
-        decision = router.decide(payload, client="cli", session_id="cli-" + secrets.token_hex(8),
+        route_token = secrets.token_hex(8)
+        decision = router.decide(payload, client="cli", session_id="cli-" + route_token,
                                  native_selection=True, mode_override=requested_mode)
         model = decision["model"]
         effort = decision.get("effort")
@@ -1074,7 +1089,7 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
         extras = ["-m", model]
         if effort and not requested_effort:
             extras.extend(["-c", "model_reasoning_effort=" + toml_string(effort)])
-        return [native, *endpoint, *extras, *clean]
+        return [native, *_cli_endpoint_args(root, config, route_token), *extras, *clean]
     except Exception:
         return [native, *endpoint, "-m", sol, *clean]
 
