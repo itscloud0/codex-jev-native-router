@@ -80,6 +80,8 @@ Healthy CLI calls use a capability protected `/cli` gateway path so telemetry id
 
 `jev-codex report` aggregates recorded model, effort, token counts, cache tokens, route switches, failures, and Jev latency. It also reports weak quality signals from Desktop: a failed prior turn, a concrete-model override after Auto, and nonzero command exits. A nonzero command exit is not necessarily a failed test or bad route. The adapter sends measured cache-read percentage, `hot`/`warming` state and age to Jev only for ten minutes after a native usage notification; no old cache reading is treated as current. To compare the observed mix against fixed all-Sol and all-Astra choices, supply your own relative weights:
 
+Desktop usage events now use the same one-way thread hash as route events, so new records can be grouped by task without storing thread IDs. Older Desktop usage events with an empty session field cannot be assigned retrospectively to a route; exclude them from task-level comparisons.
+
 ```json
 {
   "gpt-6-sol": {"input": 1, "cached_input": 0.1, "output": 2},

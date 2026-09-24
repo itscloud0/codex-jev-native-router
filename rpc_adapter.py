@@ -431,8 +431,11 @@ class Adapter:
                 usage = self.turn_usage.pop((thread_id, turn_id), None) if isinstance(turn_id, str) else None
                 saved = self.store.get(thread_id) or {}
                 model, effort = self.actual.get(thread_id, (saved.get("actual"), saved.get("effort")))
-                decision = {"model": model, "effort": effort, "client": "desktop", "session": thread_id,
-                            "turn_hash": turn_id, "mode": "auto" if saved.get("alias") == "jev-auto" else
+                decision = {"model": model, "effort": effort, "client": "desktop",
+                            "session": hashlib.sha256(thread_id.encode("utf-8", "replace")).hexdigest()[:24],
+                            "turn_hash": hashlib.sha256(turn_id.encode("utf-8", "replace")).hexdigest()[:24]
+                            if isinstance(turn_id, str) else "",
+                            "mode": "auto" if saved.get("alias") == "jev-auto" else
                             "shadow" if saved.get("alias") == "jev-shadow" else "native",
                             "reason": "concrete_model" if not saved.get("alias") else "lease"}
                 decision.update(self.turn_signals.pop(thread_id, {}))

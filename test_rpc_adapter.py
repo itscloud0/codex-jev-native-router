@@ -1,4 +1,5 @@
 import json
+import hashlib
 import io
 import os
 import stat
@@ -200,6 +201,8 @@ class AdapterTests(unittest.TestCase):
         self.adapter.server((json.dumps(complete) + '\n').encode())
         (decision, observed, status), _ = self.router.usage_records[-1]
         self.assertEqual((decision['model'], decision['effort'], status), ('gpt-6-sol', 'medium', 'ok'))
+        self.assertEqual(decision['session'], hashlib.sha256(b't').hexdigest()[:24])
+        self.assertEqual(decision['turn_hash'], hashlib.sha256(b'turn-1').hexdigest()[:24])
         self.assertEqual(observed['input_tokens'], 100)
         self.assertEqual(observed['input_tokens_details']['cached_tokens'], 40)
         self.assertNotIn('private prompt', json.dumps((decision, observed)))
