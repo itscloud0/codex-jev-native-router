@@ -309,9 +309,9 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     config = {
         "mode": "shadow",
         "auto_roles": ["luna", "terra", "sol"],
-        "auto_policy": "completion_v2",
+        "auto_policy": "completion_v3",
         "large_context_sol_floor_tokens": 48000,
-        "shadow_policy": "completion_v1",
+        "shadow_policy": "completion_v2",
         "effort_policy": "jev",
         "fixed_effort": "medium",
         "fallback_model": sol,
@@ -677,8 +677,8 @@ def status(root: Path = ROOT) -> dict:
         auto_roles = ["luna", "terra", "sol"]
     effort_policy = config.get("effort_policy") if config.get("effort_policy") in ("jev", "fixed") else "jev"
     fixed_effort = config.get("fixed_effort") if config.get("fixed_effort") in ("low", "medium", "high", "xhigh", "max", "ultra") else "medium"
-    shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1", "completion_v2") else "baseline"
-    auto_policy = config.get("auto_policy") if config.get("auto_policy") in ("baseline", "completion_v1", "completion_v2") else "baseline"
+    shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "baseline"
+    auto_policy = config.get("auto_policy") if config.get("auto_policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "baseline"
     catalog = load_json(root / "models.json")
     process: dict = {"pid": None, "rss_kib": None, "elapsed": None}
     try:
@@ -801,7 +801,7 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
     by_policy: dict[str, dict] = {}
     jev_ms = 0
     for row in route_rows:
-        policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2") else "unknown"
+        policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "unknown"
         policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {},
                                                       "confidence_samples": 0, "confidence_total": 0.0})
         policy_bucket["decisions"] += 1
@@ -891,7 +891,8 @@ def trace(thread_id: str, root: Path = ROOT) -> dict:
                     routes.append({key: row.get(key) for key in
                                    ("ts", "client", "mode", "policy", "model", "effort",
                                     "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms",
-                                    "jev_confidence", "jev_selected_probability", "jev_model")})
+                                    "jev_confidence", "jev_selected_probability", "jev_model",
+                                    "jev_effort_confidence", "work_shape")})
                     routes = routes[-64:]
                 elif row.get("event") == "usage":
                     usage_events += 1

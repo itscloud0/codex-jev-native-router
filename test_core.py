@@ -274,6 +274,68 @@ class RouterTest(unittest.TestCase):
         self.assertIsNone(record["jev_selected_probability"])
         self.assertIsNone(record["jev_model"])
 
+    def test_v3_batches_work_shape_and_effort_then_applies_deterministic_policy(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v3"
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(body)
+            return {"model": "jev-1.13.0", "answers": {
+                "work_shape": {"choice": "mechanical", "confidence": 0.8,
+                               "probabilities": {"mechanical": 0.85}},
+                "effort": {"choice": "low", "confidence": 0.9,
+                           "probabilities": {"low": 0.93}},
+            }}
+        router = self.new_router(choose)
+        result = router.decide(payload("Rename a local test variable"), session_id="v3-simple", native_selection=True)
+        self.assertEqual((result["model"], result["effort"], result["work_shape"]),
+                         ("gpt-6-luna", "low", "mechanical"))
+        self.assertEqual(set(seen[0]["questions"]), {"work_shape", "effort"})
+        self.assertEqual(result["jev_confidence"], 0.8)
+        self.assertEqual(result["jev_effort_confidence"], 0.9)
+        router.record_usage(result, None, "ok", event="route")
+        record = json.loads((self.root / "telemetry.jsonl").read_text())
+        self.assertEqual((record["policy"], record["work_shape"]), ("completion_v3", "mechanical"))
+
+    def test_v3_unknown_and_high_effort_stay_on_sol(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v3"
+        config_path.write_text(json.dumps(config))
+        answer = {"shape": "unknown", "effort": "low"}
+        router = self.new_router(lambda *args: {"answers": {
+            "work_shape": {"choice": answer["shape"]}, "effort": {"choice": answer["effort"]}}})
+        unknown = router.decide(payload("Please continue this"), session_id="v3-unknown", native_selection=True)
+        self.assertEqual((unknown["model"], unknown["effort"]), ("gpt-6-sol", "medium"))
+        explicit = payload("Please continue this")
+        explicit["requested_effort"] = "low"
+        fixed = router.decide(explicit, session_id="v3-fixed", native_selection=True)
+        self.assertEqual((fixed["model"], fixed["effort"]), ("gpt-6-sol", "low"))
+        answer.update(shape="mechanical", effort="xhigh")
+        deep = router.decide(payload("Rename a local variable"), session_id="v3-deep", native_selection=True)
+        self.assertEqual((deep["model"], deep["effort"]), ("gpt-6-sol", "high"))
+
+    def test_v3_frontier_is_offered_only_when_astra_is_allowlisted(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v3"
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(set(body["questions"]["work_shape"]["criteria"]))
+            return {"answers": {"work_shape": {"choice": "frontier"}, "effort": {"choice": "high"}}}
+        router = self.new_router(choose)
+        blocked = router.decide(payload("Review authentication architecture"), session_id="v3-no-astra", native_selection=True)
+        self.assertNotIn("frontier", seen[-1])
+        self.assertEqual(blocked["model"], "gpt-6-sol")
+        config["auto_roles"] = ["luna", "terra", "sol", "astra"]
+        config_path.write_text(json.dumps(config))
+        allowed = router.decide(payload("Review authentication architecture"), session_id="v3-astra", native_selection=True)
+        self.assertIn("frontier", seen[-1])
+        self.assertEqual((allowed["model"], allowed["effort"]), ("gpt-6-astra", "high"))
+
     def test_joint_shadow_rejects_unavailable_pair_without_execution_change(self):
         config_path = self.root / "config.json"
         config = json.loads(config_path.read_text())
