@@ -799,12 +799,16 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         failures += row.get("status") in ("failed", "error")
     proposals: dict[str, int] = {}
     reasons: dict[str, int] = {}
+    model_bases: dict[str, int] = {}
     by_policy: dict[str, dict] = {}
     jev_ms = 0
     for row in route_rows:
         reason = row.get("reason")
         if isinstance(reason, str) and reason:
             reasons[reason] = reasons.get(reason, 0) + 1
+        basis = row.get("model_basis")
+        if basis in ("jev_work_shape", "sole_eligible_model"):
+            model_bases[basis] = model_bases.get(basis, 0) + 1
         policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "unknown"
         policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {}, "work_shapes": {},
                                                       "confidence_samples": 0, "confidence_total": 0.0})
@@ -829,6 +833,41 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         samples = bucket.pop("confidence_samples")
         total = bucket.pop("confidence_total")
         bucket["confidence"] = {"samples": samples, "mean": round(total / samples, 4) if samples else None}
+    route_ids = {row.get("route_id"): row for row in route_rows
+                 if isinstance(row.get("route_id"), str) and re.fullmatch(r"[a-f0-9]{24}", row["route_id"])}
+    linked_ids: set[str] = set()
+    outcome_by_model: dict[str, dict] = {}
+    outcome_by_shape: dict[str, dict] = {}
+    outcome_by_policy: dict[str, dict] = {}
+    def add_outcome(buckets: dict, key: str, usage: dict) -> None:
+        bucket = buckets.setdefault(key, {"turns": 0, "completed_turns": 0, "failed_turns": 0,
+                                          "cancelled_turns": 0, "command_failures": 0,
+                                          "prior_failed_turns": 0, "usage_missing": 0,
+                                          "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0})
+        bucket["turns"] += 1
+        bucket["completed_turns"] += usage.get("status") == "ok"
+        bucket["failed_turns"] += usage.get("status") == "error"
+        bucket["cancelled_turns"] += usage.get("status") == "cancelled"
+        bucket["prior_failed_turns"] += usage.get("prior_failed") is True
+        bucket["usage_missing"] += usage.get("usage_missing") is True
+        failures = usage.get("command_failures")
+        if isinstance(failures, int) and not isinstance(failures, bool) and 0 <= failures <= 255:
+            bucket["command_failures"] += failures
+        for field in ("input_tokens", "cached_input_tokens", "output_tokens"):
+            value = usage.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                bucket[field] += value
+    for usage in usage_rows:
+        route_id = usage.get("route_id")
+        route = route_ids.get(route_id) if isinstance(route_id, str) else None
+        if (not route or route_id in linked_ids or route.get("session") != usage.get("session")
+                or route.get("client") != usage.get("client") or route.get("model") != usage.get("model")
+                or route.get("effort") != usage.get("effort")):
+            continue
+        linked_ids.add(route_id)
+        add_outcome(outcome_by_model, str(route.get("model") or "unknown"), usage)
+        add_outcome(outcome_by_shape, str(route.get("work_shape") or "not_classified"), usage)
+        add_outcome(outcome_by_policy, str(route.get("policy") or "unknown"), usage)
     totals = {field: sum(row[field] for row in by_model.values()) for field in ("input_tokens", "cached_input_tokens", "output_tokens")}
     comparison: dict = {"token_hold_constant": totals, "weights_source": "none", "actual_units": None,
                         "all_sol_units": None, "all_astra_units": None}
@@ -861,9 +900,13 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
                      },
                      "by_model": by_model, "by_client": by_client},
         "routes": {"decisions": len(route_rows), "switches": sum(row.get("switched") is True for row in route_rows),
-                   "jev_ms": jev_ms, "proposed_models": proposals, "reasons": reasons, "by_policy": by_policy},
+                   "jev_ms": jev_ms, "proposed_models": proposals, "reasons": reasons,
+                   "model_bases": model_bases, "by_policy": by_policy,
+                   "outcomes": {"linked_turns": len(linked_ids), "unlinked_routes": len(route_rows) - len(linked_ids),
+                                "by_model": outcome_by_model, "by_work_shape": outcome_by_shape,
+                                "by_policy": outcome_by_policy}},
         "counterfactual": comparison,
-        "note": "Token-hold-constant comparisons are sensitivity estimates, not Pro cost or quality-equivalent savings.",
+        "note": "Linked turn status and command exits are weak signals, not task correctness; native last-call tokens may not cover the whole turn. Token-hold-constant comparisons are sensitivity estimates, not Pro cost or quality-equivalent savings.",
     }
 
 
@@ -900,7 +943,7 @@ def trace(thread_id: str, root: Path = ROOT) -> dict:
                                    ("ts", "client", "mode", "policy", "model", "effort",
                                     "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms",
                                     "jev_confidence", "jev_selected_probability", "jev_model",
-                                    "jev_effort_confidence", "work_shape")})
+                                    "jev_effort_confidence", "work_shape", "model_basis")})
                     routes = routes[-64:]
                 elif row.get("event") == "usage":
                     usage_events += 1

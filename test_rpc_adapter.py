@@ -207,6 +207,23 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(observed['input_tokens_details']['cached_tokens'], 40)
         self.assertNotIn('private prompt', json.dumps((decision, observed)))
 
+    def test_auto_route_id_links_only_its_completed_turn(self):
+        self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',
+                                                   'input': [{'type': 'text', 'text': 'private prompt'}]}))
+        route = self.router.usage_records[-1][0][0]
+        self.assertEqual(len(route['route_id']), 24)
+        self.assertNotIn('private prompt', json.dumps(route))
+        completed = {'jsonrpc': '2.0', 'method': 'turn/completed', 'params': {
+            'threadId': 't', 'turn': {'id': 'turn-1', 'status': 'completed'}}}
+        self.adapter.server((json.dumps(completed) + '\n').encode())
+        usage = self.router.usage_records[-1][0][0]
+        self.assertEqual(usage['route_id'], route['route_id'])
+        self.assertNotIn('t', usage['route_id'])
+        self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'gpt-6-sol',
+                                                   'input': [{'type': 'text', 'text': 'manual'}]}, 2))
+        self.adapter.server((json.dumps(completed) + '\n').encode())
+        self.assertEqual(self.router.usage_records[-1][0][0]['route_id'], '')
+
     def test_desktop_weak_quality_signals_are_counts_only(self):
         self.adapter.store.update('t', alias='jev-auto', failed=True)
         self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',

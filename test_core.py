@@ -401,7 +401,7 @@ class RouterTest(unittest.TestCase):
         config_path.write_text(json.dumps(config))
         seen = []
         def choose(body, timeout, key_file):
-            seen.append(set(body["questions"]["work_shape"]["criteria"]))
+            seen.append(set(body["questions"].get("work_shape", {}).get("criteria", {})))
             return {"answers": {"work_shape": {"choice": "frontier"}, "effort": {"choice": "high"}}}
         router = self.new_router(choose)
         blocked = router.decide(payload("Review authentication architecture"), session_id="v3-no-astra", native_selection=True)
@@ -412,6 +412,43 @@ class RouterTest(unittest.TestCase):
         allowed = router.decide(payload("Review authentication architecture"), session_id="v3-astra", native_selection=True)
         self.assertIn("frontier", seen[-1])
         self.assertEqual((allowed["model"], allowed["effort"]), ("gpt-6-astra", "high"))
+
+    def test_v3_asks_only_effort_when_sol_is_sole_eligible_model(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v3"
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(body)
+            return {"model": "jev-1.13.0", "answers": {"effort": {"choice": "medium", "confidence": 0.72}}}
+        router = self.new_router(choose)
+        result = router.decide(payload("Continue the task", context_tokens=100_000),
+                               session_id="v3-sole-sol", native_selection=True)
+        self.assertEqual(set(seen[0]["questions"]), {"effort"})
+        self.assertEqual((result["model"], result["effort"], result["model_basis"]),
+                         ("gpt-6-sol", "medium", "sole_eligible_model"))
+        self.assertNotIn("work_shape", result)
+        self.assertEqual(result["jev_effort_confidence"], 0.72)
+        router.record_usage(result, None, "ok", event="route")
+        record = json.loads((self.root / "telemetry.jsonl").read_text())
+        self.assertEqual(record["model_basis"], "sole_eligible_model")
+        low_router = self.new_router(lambda *args: {"answers": {"effort": {"choice": "low"}}})
+        low = low_router.decide(payload("Continue the task", context_tokens=100_000),
+                                session_id="v3-sole-sol-low", native_selection=True)
+        self.assertEqual((low["model"], low["effort"]), ("gpt-6-sol", "medium"))
+
+    def test_route_id_telemetry_accepts_only_random_hex_identifier(self):
+        decision = self.router.decide(payload("Rename a local variable"), session_id="route-id",
+                                      native_selection=True)
+        decision["route_id"] = "a" * 24
+        self.router.record_usage(decision, None, "ok", event="route")
+        decision["route_id"] = "private prompt"
+        self.router.record_usage(decision, None, "ok", event="usage")
+        records = [json.loads(line) for line in (self.root / "telemetry.jsonl").read_text().splitlines()]
+        self.assertEqual(records[0]["route_id"], "a" * 24)
+        self.assertEqual(records[1]["route_id"], "")
+        self.assertNotIn("private prompt", (self.root / "telemetry.jsonl").read_text())
 
     def test_joint_shadow_rejects_unavailable_pair_without_execution_change(self):
         config_path = self.root / "config.json"

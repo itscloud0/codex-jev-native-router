@@ -161,6 +161,7 @@ class Adapter:
         self.last_context: dict[str, int] = {}
         self.last_cache_pct: dict[str, tuple[int, float]] = {}
         self.turn_usage: dict[tuple[str, str], dict] = {}
+        self.turn_routes: dict[str, str] = {}
         self.turn_signals: dict[str, dict] = {}
         self.pending_override: dict[str, bool] = {}
 
@@ -237,6 +238,8 @@ class Adapter:
                         model, effort = self._sol(), "medium"
                     decision = {**decision, "model": model, "effort": effort, "reason": "lease_hysteresis"}
                 decision = {**decision, "model": model, "effort": effort}
+                decision["route_id"] = os.urandom(12).hex()
+                self._remember(self.turn_routes, thread_id, decision["route_id"])
                 self.router.record_usage(decision, None, "ok", event="route")
                 return model, effort, decision
         except Exception:
@@ -438,6 +441,7 @@ class Adapter:
                             "mode": "auto" if saved.get("alias") == "jev-auto" else
                             "shadow" if saved.get("alias") == "jev-shadow" else "native",
                             "reason": "concrete_model" if not saved.get("alias") else "lease"}
+                decision["route_id"] = self.turn_routes.pop(thread_id, "")
                 decision.update(self.turn_signals.pop(thread_id, {}))
                 status = "error" if failed else "cancelled" if isinstance(turn, dict) and turn.get("status") == "interrupted" else "ok"
                 self.router.record_usage(decision, usage, status)
@@ -463,6 +467,7 @@ class Adapter:
         if pending and pending["method"] == "turn/start" and "error" in message:
             self.active.discard(pending.get("thread"))
             self.turn_signals.pop(pending.get("thread"), None)
+            self.turn_routes.pop(pending.get("thread"), None)
         if not pending or "result" not in message or not isinstance(message["result"], dict):
             return raw
         result = message["result"]

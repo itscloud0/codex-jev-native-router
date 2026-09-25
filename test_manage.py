@@ -359,10 +359,13 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(no_weights["routes"], {"decisions": 1, "switches": 1, "jev_ms": 25,
                                                  "proposed_models": {"gpt-6-astra": 1},
                                                  "reasons": {},
+                                                 "model_bases": {},
                                                  "by_policy": {"unknown": {"decisions": 1,
                                                                             "proposed_models": {"gpt-6-astra": 1},
                                                                             "work_shapes": {},
-                                                                            "confidence": {"samples": 0, "mean": None}}}})
+                                                                            "confidence": {"samples": 0, "mean": None}}},
+                                                 "outcomes": {"linked_turns": 0, "unlinked_routes": 1,
+                                                              "by_model": {}, "by_work_shape": {}, "by_policy": {}}})
         weights = {"gpt-6-sol": {"input": 1, "cached_input": 0.5, "output": 2},
                    "gpt-6-astra": {"input": 2, "cached_input": 1, "output": 4}}
         result = manage.report(self.root, weights)
@@ -382,6 +385,31 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(bucket["decisions"], 3)
         self.assertEqual(bucket["confidence"], {"samples": 2, "mean": 0.7})
         self.assertEqual(bucket["work_shapes"], {"unknown": 1})
+
+    def test_report_links_only_matching_route_and_turn_metadata(self):
+        self.install()
+        path = self.root / "state/telemetry.jsonl"
+        route = {"event": "route", "route_id": "a" * 24, "session": "b" * 24,
+                 "client": "desktop", "policy": "completion_v3", "work_shape": "routine",
+                 "model": "gpt-6-terra", "effort": "medium", "model_basis": "jev_work_shape"}
+        usage = {"event": "usage", "route_id": "a" * 24, "session": "b" * 24,
+                 "client": "desktop", "model": "gpt-6-terra", "effort": "medium",
+                 "status": "error", "prior_failed": True, "command_failures": 2,
+                 "input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 10,
+                 "usage_missing": False}
+        wrong_session = {**usage, "session": "c" * 24}
+        unlinked = {**route, "route_id": "d" * 24, "work_shape": "unknown", "model_basis": None}
+        path.write_text("\n".join(json.dumps(row) for row in
+                                  (route, wrong_session, usage, unlinked)) + "\n")
+        routes = manage.report(self.root)["routes"]
+        self.assertEqual(routes["model_bases"], {"jev_work_shape": 1})
+        self.assertEqual(routes["outcomes"]["linked_turns"], 1)
+        self.assertEqual(routes["outcomes"]["unlinked_routes"], 1)
+        result = routes["outcomes"]["by_work_shape"]["routine"]
+        self.assertEqual((result["turns"], result["failed_turns"], result["command_failures"],
+                          result["prior_failed_turns"], result["cached_input_tokens"]),
+                         (1, 1, 2, 1, 80))
+        self.assertNotIn("unknown", routes["outcomes"]["by_work_shape"])
 
     def test_trace_explains_auto_route_without_prompt_data(self):
         self.install()
