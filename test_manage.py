@@ -361,6 +361,7 @@ class InstallTests(unittest.TestCase):
                                                  "reasons": {},
                                                  "by_policy": {"unknown": {"decisions": 1,
                                                                             "proposed_models": {"gpt-6-astra": 1},
+                                                                            "work_shapes": {},
                                                                             "confidence": {"samples": 0, "mean": None}}}})
         weights = {"gpt-6-sol": {"input": 1, "cached_input": 0.5, "output": 2},
                    "gpt-6-astra": {"input": 2, "cached_input": 1, "output": 4}}
@@ -372,7 +373,7 @@ class InstallTests(unittest.TestCase):
         self.install()
         path = self.root / "state/telemetry.jsonl"
         rows = [
-            {"event": "route", "policy": "completion_v2", "jev_confidence": 0.9},
+            {"event": "route", "policy": "completion_v2", "jev_confidence": 0.9, "work_shape": "unknown"},
             {"event": "route", "policy": "completion_v2", "jev_confidence": 0.5},
             {"event": "route", "policy": "completion_v2", "jev_confidence": "invalid"},
         ]
@@ -380,6 +381,7 @@ class InstallTests(unittest.TestCase):
         bucket = manage.report(self.root)["routes"]["by_policy"]["completion_v2"]
         self.assertEqual(bucket["decisions"], 3)
         self.assertEqual(bucket["confidence"], {"samples": 2, "mean": 0.7})
+        self.assertEqual(bucket["work_shapes"], {"unknown": 1})
 
     def test_trace_explains_auto_route_without_prompt_data(self):
         self.install()

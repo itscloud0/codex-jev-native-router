@@ -806,9 +806,13 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         if isinstance(reason, str) and reason:
             reasons[reason] = reasons.get(reason, 0) + 1
         policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "unknown"
-        policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {},
+        policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {}, "work_shapes": {},
                                                       "confidence_samples": 0, "confidence_total": 0.0})
         policy_bucket["decisions"] += 1
+        shape = row.get("work_shape")
+        if shape in ("mechanical", "routine", "substantive", "unknown", "frontier"):
+            shapes = policy_bucket["work_shapes"]
+            shapes[shape] = shapes.get(shape, 0) + 1
         confidence = row.get("jev_confidence")
         if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and math.isfinite(confidence) and 0 <= confidence <= 1:
             policy_bucket["confidence_samples"] += 1
