@@ -317,6 +317,9 @@ class RouterTest(unittest.TestCase):
             request["current_model"] = "gpt-6-sol" if i == 0 else results[-1]["model"]
             request["cached_input_pct"] = 96
             results.append(router.decide(request, session_id="v4-long", native_selection=True))
+            if i == 0:
+                leases = json.loads((self.root / "leases.json").read_text())
+                self.assertEqual(next(iter(leases.values()))["anchor_shape"], "mechanical")
         self.assertEqual([item["model"] for item in results], ["gpt-6-sol", "gpt-6-sol", "gpt-6-luna"])
         self.assertEqual([item["reason"] for item in results], ["cache_hysteresis", "cache_hysteresis", "jev"])
         self.assertTrue(all("work_shape" in body["questions"] for body in seen))

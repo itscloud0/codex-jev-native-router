@@ -491,7 +491,7 @@ class Router:
                 decision["policy"] = policy
                 decision.update({"session": session, "turn_hash": turn_hash})
                 if mode != "off" and decision["mode"] != "off":
-                    anchor_shape = decision.get("work_shape") if decision.get("reason") in ("jev", "decision_cache", "lease_hysteresis") else None
+                    anchor_shape = decision.get("work_shape") if decision.get("reason") in ("jev", "decision_cache", "lease_hysteresis", "cache_hysteresis") else None
                     if decision.get("reason") in ("lease", "continuation_lease") and lease:
                         anchor_shape = lease.get("anchor_shape")
                     leases[session] = {"model": decision["model"], "effort": decision["effort"], "role": decision.get("role", "sol"), "policy": policy, "turn_hash": turn_hash or (lease or {}).get("turn_hash", ""), "turns": decision.get("turns", 1), "updated": time.time(),

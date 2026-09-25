@@ -44,6 +44,7 @@ Run from this directory after reviewing `manage.py`, `core.py`, and `transport.p
 /opt/homebrew/bin/python3 manage.py install --execution-binary /Applications/ChatGPT.app/Contents/Resources/codex --key-file /absolute/path/to/owner-only-typesafe-key
 jev-codex status
 jev-codex report
+jev-codex evaluate --hours 24
 jev-codex trace THREAD_UUID
 jev-codex desktop-enable
 jev-codex desktop-disable
@@ -106,6 +107,12 @@ Desktop usage events now use the same one-way thread hash as route events, so ne
 ```
 
 Run `jev-codex report --weights /absolute/path/weights.json`. Include weights for every observed model. The comparison holds token counts constant and is a sensitivity estimate. It does not measure Pro quota debits, quality equivalence, or money saved.
+
+`jev-codex evaluate [--hours 1..720]` isolates current-policy (`completion_v4`) Auto/Shadow receipts. It shows executed and proposed model counts, explicit `unknown` versus no classification, cache-held proposals, exact route-to-usage linkage, and weak outcome signals by executed model. It deliberately returns `quality_equivalent_savings: null` until matched, quality-checked comparisons exist. The report reads the current telemetry file; its window cannot recover older rotated records. It never prints task text or source.
+
+For a small human-reviewed sample, `jev-codex trace THREAD_UUID` exposes the random route ID. Put one local JSONL record per reviewed route in an owner-only file, for example `{"route_id":"0123456789abcdef01234567","outcome":"accepted"}`. Allowed outcomes are `accepted`, `rework`, and `failed`; these describe the *observed executed route*, not a hypothetical cheaper model. Run `jev-codex evaluate --hours 168 --labels /absolute/path/labels.jsonl`. Only labels for exactly linked turns in the window count; unrelated fields are ignored and never echoed. Do not put prompts, source, or secrets in label files. These subjective labels still cannot prove an all-Sol or all-Astra counterfactual. A proper savings claim needs comparable real coding tasks, acceptance checks, full-turn usage and rework tracking.
+
+The [Keel decision architecture](https://github.com/codejunkie99/keel/blob/3fc24b0ee3eff8938dde33c90bbf93125bc4e804/docs/decision-architecture.md) supports host-validated choices and explicit receipts, but its in-loop tool control applies to its own embedded agent, not Codex's internal loop. The [Jev alignment-detection study](https://arxiv.org/pdf/2609.29429v1) evaluates error detection rather than coding model routing. Its 63× figure compares detector costs with LLM judges; it is not a Codex Pro savings estimate. We do not use its probabilities as uncalibrated routing thresholds.
 
 ## Limits
 

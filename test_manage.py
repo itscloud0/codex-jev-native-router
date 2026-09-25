@@ -3,6 +3,7 @@ import os
 import subprocess
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -412,6 +413,45 @@ class InstallTests(unittest.TestCase):
                          (1, 1, 2, 1, 80))
         self.assertNotIn("unknown", routes["outcomes"]["by_work_shape"])
 
+    def test_evaluate_filters_current_policy_and_links_only_exact_turns(self):
+        self.install()
+        now = int(time.time())
+        route = {"event": "route", "ts": now, "route_id": "a" * 24,
+                 "session": "b" * 24, "client": "desktop", "mode": "auto",
+                 "policy": "completion_v4", "model": "gpt-6-sol", "effort": "medium",
+                 "proposed_model": "gpt-6-terra", "reason": "cache_hysteresis",
+                 "work_shape": "routine", "prompt": "private source"}
+        usage = {"event": "usage", "ts": now, "route_id": "a" * 24,
+                 "session": "b" * 24, "client": "desktop", "model": "gpt-6-sol",
+                 "effort": "medium", "status": "ok", "command_failures": 1,
+                 "input_tokens": 100, "cached_input_tokens": 90, "output_tokens": 5}
+        wrong = {**usage, "session": "wrong"}
+        old = {**route, "route_id": "c" * 24, "ts": now - 100000}
+        older_policy = {**route, "route_id": "d" * 24, "policy": "completion_v3"}
+        path = self.root / "state/telemetry.jsonl"
+        path.write_text("\n".join(json.dumps(row) for row in
+                                  (route, wrong, usage, old, older_policy)) + "\n")
+        result = manage.evaluate(self.root, hours=24)
+        self.assertEqual((result["routes"], result["linked_turns"], result["proposal_held_by_cache"]), (1, 1, 1))
+        self.assertEqual(result["executed_models"], {"gpt-6-sol": 1})
+        self.assertEqual(result["proposed_models"], {"gpt-6-terra": 1})
+        self.assertEqual(result["outcomes_by_executed_model"]["gpt-6-sol"]["nonzero_command_exits"], 1)
+        self.assertIsNone(result["quality_equivalent_savings"])
+        self.assertNotIn("private source", json.dumps(result))
+        labels = self.root / "labels.jsonl"
+        labels.write_text(json.dumps({"route_id": "a" * 24, "outcome": "rework", "comment": "private source"}) + "\n")
+        reviewed = manage.evaluate(self.root, labels_path=labels)
+        self.assertEqual(reviewed["human_labels"], {"linked_labeled_turns": 1,
+                                                    "by_executed_model": {"gpt-6-sol": {
+                                                        "accepted": 0, "rework": 1, "failed": 0}}})
+        self.assertNotIn("private source", json.dumps(reviewed))
+        labels.write_text(json.dumps({"route_id": "a" * 24, "outcome": "accepted"}) + "\n" +
+                          json.dumps({"route_id": "a" * 24, "outcome": "rework"}) + "\n")
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            manage.evaluate(self.root, labels_path=labels)
+        with self.assertRaises(ValueError):
+            manage.evaluate(self.root, hours=0)
+
     def test_trace_explains_auto_route_without_prompt_data(self):
         self.install()
         thread_id = "01a0cbdf-57ca-7de2-b8f5-72b8c74a5568"
@@ -422,7 +462,7 @@ class InstallTests(unittest.TestCase):
             "alias": "jev-auto", "actual": "gpt-6-sol", "effort_override": "high",
             "private": "must not appear"}}))
         rows = [
-            {"event": "route", "session": digest[:24], "model": "gpt-6-sol", "effort": "high",
+            {"event": "route", "route_id": "a" * 24, "session": digest[:24], "model": "gpt-6-sol", "effort": "high",
              "reason": "privacy_fallback", "mode": "auto", "client": "desktop", "prompt": "secret"},
             {"event": "usage", "session": digest[:24], "model": "gpt-6-sol", "effort": "high",
              "input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 10},
@@ -434,6 +474,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result["selection"], {"alias": "jev-auto", "actual": "gpt-6-sol",
                                                 "effort_override": "high"})
         self.assertEqual(result["routes"][0]["reason"], "privacy_fallback")
+        self.assertEqual(result["routes"][0]["route_id"], "a" * 24)
         self.assertEqual(result["usage_events"], 1)
         self.assertEqual(result["executor_usage"]["gpt-6-sol/high"]["cached_input_tokens"], 60)
         self.assertEqual(manage.route(thread_id, self.root)["model"], "gpt-6-sol")

@@ -910,6 +910,105 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
     }
 
 
+def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None) -> dict:
+    """Audit the active policy's route funnel without treating weak signals as savings."""
+    if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= 24 * 30:
+        raise ValueError("hours must be between 1 and 720")
+    cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - hours * 3600
+    path = root / "state/telemetry.jsonl"
+    rows = []
+    if path.exists():
+        with path.open() as source:
+            for line in source:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("ts"), (int, float)) and not isinstance(row["ts"], bool) and row["ts"] >= cutoff:
+                    rows.append(row)
+    routes = [row for row in rows if row.get("event") == "route" and row.get("policy") == "completion_v4"
+              and row.get("mode") in ("auto", "shadow")]
+    def counts(key: str, missing: str = "unknown") -> dict[str, int]:
+        result: dict[str, int] = {}
+        for row in routes:
+            value = row.get(key)
+            label = value if isinstance(value, str) and value else missing
+            result[label] = result.get(label, 0) + 1
+        return dict(sorted(result.items()))
+    route_ids = {row["route_id"]: row for row in routes
+                 if isinstance(row.get("route_id"), str) and re.fullmatch(r"[a-f0-9]{24}", row["route_id"])}
+    linked: dict[str, dict] = {}
+    for usage in rows:
+        if usage.get("event") != "usage" or not isinstance(usage.get("route_id"), str):
+            continue
+        route_id = usage["route_id"]
+        route = route_ids.get(route_id)
+        if (route is None or route_id in linked or route.get("session") != usage.get("session")
+                or route.get("client") != usage.get("client") or route.get("model") != usage.get("model")
+                or route.get("effort") != usage.get("effort")):
+            continue
+        linked[route_id] = usage
+    outcomes: dict[str, dict] = {}
+    for route_id, usage in linked.items():
+        model = route_ids[route_id]["model"]
+        bucket = outcomes.setdefault(model, {"turns": 0, "ok": 0, "error": 0, "cancelled": 0,
+                                             "usage_missing": 0, "nonzero_command_exits": 0,
+                                             "last_call_input_tokens": 0, "last_call_cached_input_tokens": 0,
+                                             "last_call_output_tokens": 0})
+        bucket["turns"] += 1
+        status = usage.get("status")
+        if status in ("ok", "error", "cancelled"):
+            bucket[status] += 1
+        bucket["usage_missing"] += usage.get("usage_missing") is True
+        failures = usage.get("command_failures")
+        if isinstance(failures, int) and not isinstance(failures, bool) and 0 <= failures <= 255:
+            bucket["nonzero_command_exits"] += failures
+        for source_key, target_key in (("input_tokens", "last_call_input_tokens"),
+                                       ("cached_input_tokens", "last_call_cached_input_tokens"),
+                                       ("output_tokens", "last_call_output_tokens")):
+            value = usage.get(source_key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                bucket[target_key] += value
+    human_outcomes: dict[str, dict[str, int]] = {}
+    if labels_path is not None:
+        if labels_path.stat().st_size > 1_000_000:
+            raise ValueError("labels file exceeds 1 MB")
+        seen_labels: set[str] = set()
+        with labels_path.open() as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    label = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("invalid labels JSONL") from exc
+                if not isinstance(label, dict) or not isinstance(label.get("route_id"), str) or not re.fullmatch(r"[a-f0-9]{24}", label["route_id"]) or label.get("outcome") not in ("accepted", "rework", "failed"):
+                    raise ValueError("labels require route_id and accepted/rework/failed outcome")
+                route_id = label["route_id"]
+                if route_id in seen_labels:
+                    raise ValueError("duplicate route_id in labels")
+                seen_labels.add(route_id)
+                if route_id not in linked:
+                    continue
+                model = route_ids[route_id]["model"]
+                bucket = human_outcomes.setdefault(model, {"accepted": 0, "rework": 0, "failed": 0})
+                bucket[label["outcome"]] += 1
+    return {
+        "policy": "completion_v4", "window_hours": hours, "routes": len(routes),
+        "by_mode": counts("mode"), "by_client": counts("client"),
+        "executed_models": counts("model"), "proposed_models": counts("proposed_model"),
+        "reasons": counts("reason"), "work_shapes": counts("work_shape", "not_classified"),
+        "proposal_held_by_cache": sum(row.get("reason") in ("cache_hysteresis", "shadow_cache_hysteresis")
+                                      and row.get("model") != row.get("proposed_model") for row in routes),
+        "linked_turns": len(linked), "unlinked_routes": len(routes) - len(linked),
+        "outcomes_by_executed_model": outcomes,
+        "human_labels": {"linked_labeled_turns": sum(sum(bucket.values()) for bucket in human_outcomes.values()),
+                         "by_executed_model": human_outcomes},
+        "quality_equivalent_savings": None,
+        "note": "Route counts are not task outcomes. Linked usage is the native last model call, not necessarily the whole turn. Command exits and turn status do not establish correctness. Human labels are local subjective outcomes, not paired counterfactuals. No quality-equivalent all-Sol or all-Astra savings estimate exists.",
+    }
+
+
 def trace(thread_id: str, root: Path = ROOT) -> dict:
     """Explain one thread using only hashed, allowlisted local metadata."""
     if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", thread_id):
@@ -939,11 +1038,14 @@ def trace(thread_id: str, root: Path = ROOT) -> dict:
                 if not isinstance(row, dict) or row.get("session") != session:
                     continue
                 if row.get("event") == "route":
-                    routes.append({key: row.get(key) for key in
-                                   ("ts", "client", "mode", "policy", "model", "effort",
-                                    "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms",
-                                    "jev_confidence", "jev_selected_probability", "jev_model",
-                                    "jev_effort_confidence", "work_shape", "model_basis")})
+                    view = {key: row.get(key) for key in
+                            ("ts", "client", "mode", "policy", "model", "effort",
+                             "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms",
+                             "jev_confidence", "jev_selected_probability", "jev_model",
+                             "jev_effort_confidence", "work_shape", "model_basis")}
+                    route_id = row.get("route_id")
+                    view["route_id"] = route_id if isinstance(route_id, str) and re.fullmatch(r"[a-f0-9]{24}", route_id) else None
+                    routes.append(view)
                     routes = routes[-64:]
                 elif row.get("event") == "usage":
                     usage_events += 1
@@ -1176,7 +1278,7 @@ def native_main() -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "trace", "route", "disable", "enable", "rollback", "update",
+    commands = {"install", "status", "doctor", "report", "evaluate", "trace", "route", "disable", "enable", "rollback", "update",
                 "desktop-enable", "desktop-disable"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1203,6 +1305,13 @@ def main() -> None:
                     raise ValueError("usage: jev-codex report [--weights path.json]")
                 weights = load_json(Path(argv[2])) if len(argv) == 3 else None
                 print(json.dumps(report(weights=weights), indent=2))
+            elif cmd == "evaluate":
+                options = argv[1:]
+                if len(options) % 2 or any(options[i] not in ("--hours", "--labels") for i in range(0, len(options), 2)) or len(set(options[::2])) != len(options) // 2:
+                    raise ValueError("usage: jev-codex evaluate [--hours 1..720] [--labels path.jsonl]")
+                settings = dict(zip(options[::2], options[1::2]))
+                print(json.dumps(evaluate(hours=int(settings.get("--hours", 24)),
+                                          labels_path=Path(settings["--labels"]) if "--labels" in settings else None), indent=2))
             elif cmd == "trace":
                 if len(argv) != 2:
                     raise ValueError("usage: jev-codex trace THREAD_UUID")
