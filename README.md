@@ -27,11 +27,6 @@
 | **Jev Shadow** | Sol | Records the route Auto would propose |
 | **Concrete model** | Your selection | Bypassed; manual choice wins |
 
-```text
-bounded task excerpt → Jev: work shape + effort → local policy: allowlist, risk, cache → native Codex
-                                      ↘ invalid / unavailable → Sol fallback
-```
-
 > [!NOTE]
 > The default Auto allowlist is Luna, Terra and Sol. Astra remains a manual
 > choice until its automatic use is justified by real outcome data. The
