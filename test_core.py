@@ -362,6 +362,20 @@ class RouterTest(unittest.TestCase):
                                session_id="v4-manual", native_selection=True)
         self.assertEqual((manual["model"], manual["reason"]), ("gpt-6-terra", "concrete_model"))
 
+    def test_v4_shadow_runs_sol_and_records_same_policy_proposal(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config.update(auto_policy="completion_v4", shadow_policy="completion_v4")
+        config_path.write_text(json.dumps(config))
+        router = self.new_router(lambda *args: {"answers": {"work_shape": {"choice": "mechanical"},
+                                                           "effort": {"choice": "low"}}})
+        request = payload("Rename a local test variable", model="jev-shadow", context_tokens=1000)
+        shadow = router.decide(request, session_id="v4-shadow", native_selection=True)
+        self.assertEqual((shadow["model"], shadow["effort"], shadow["proposed_model"],
+                          shadow["proposed_effort"], shadow["policy"]),
+                         ("gpt-6-sol", "medium", "gpt-6-luna", "low", "completion_v4"))
+        self.assertEqual(shadow["reason"], "shadow_jev")
+
     def test_v3_unknown_and_high_effort_stay_on_sol(self):
         config_path = self.root / "config.json"
         config = json.loads(config_path.read_text())

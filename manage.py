@@ -311,7 +311,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         "auto_roles": ["luna", "terra", "sol"],
         "auto_policy": "completion_v4",
         "large_context_sol_floor_tokens": 48000,
-        "shadow_policy": "completion_v2",
+        "shadow_policy": "completion_v4",
         "effort_policy": "jev",
         "fixed_effort": "medium",
         "fallback_model": sol,
