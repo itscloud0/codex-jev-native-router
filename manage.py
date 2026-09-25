@@ -309,7 +309,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     config = {
         "mode": "shadow",
         "auto_roles": ["luna", "terra", "sol"],
-        "auto_policy": "completion_v3",
+        "auto_policy": "completion_v4",
         "large_context_sol_floor_tokens": 48000,
         "shadow_policy": "completion_v2",
         "effort_policy": "jev",
@@ -677,8 +677,8 @@ def status(root: Path = ROOT) -> dict:
         auto_roles = ["luna", "terra", "sol"]
     effort_policy = config.get("effort_policy") if config.get("effort_policy") in ("jev", "fixed") else "jev"
     fixed_effort = config.get("fixed_effort") if config.get("fixed_effort") in ("low", "medium", "high", "xhigh", "max", "ultra") else "medium"
-    shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "baseline"
-    auto_policy = config.get("auto_policy") if config.get("auto_policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "baseline"
+    shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3", "completion_v4") else "baseline"
+    auto_policy = config.get("auto_policy") if config.get("auto_policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3", "completion_v4") else "baseline"
     catalog = load_json(root / "models.json")
     process: dict = {"pid": None, "rss_kib": None, "elapsed": None}
     try:
@@ -809,7 +809,7 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         basis = row.get("model_basis")
         if basis in ("jev_work_shape", "sole_eligible_model"):
             model_bases[basis] = model_bases.get(basis, 0) + 1
-        policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "unknown"
+        policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3", "completion_v4") else "unknown"
         policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {}, "work_shapes": {},
                                                       "confidence_samples": 0, "confidence_total": 0.0})
         policy_bucket["decisions"] += 1

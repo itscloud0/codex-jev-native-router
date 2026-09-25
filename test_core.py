@@ -299,6 +299,69 @@ class RouterTest(unittest.TestCase):
         record = json.loads((self.root / "telemetry.jsonl").read_text())
         self.assertEqual((record["policy"], record["work_shape"]), ("completion_v3", "mechanical"))
 
+    def test_v4_long_context_keeps_cheaper_roles_eligible_and_switches_after_stable_choices(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config.update(auto_policy="completion_v4", large_context_sol_floor_tokens=48_000)
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(body)
+            return {"answers": {"work_shape": {"choice": "mechanical", "confidence": 0.9,
+                                                "probabilities": {"mechanical": 0.94}},
+                                "effort": {"choice": "low"}}}
+        router = self.new_router(choose)
+        results = []
+        for i in range(3):
+            request = payload(f"Rename the local test variable number {i}", context_tokens=100_000)
+            request["current_model"] = "gpt-6-sol" if i == 0 else results[-1]["model"]
+            request["cached_input_pct"] = 96
+            results.append(router.decide(request, session_id="v4-long", native_selection=True))
+        self.assertEqual([item["model"] for item in results], ["gpt-6-sol", "gpt-6-sol", "gpt-6-luna"])
+        self.assertEqual([item["reason"] for item in results], ["cache_hysteresis", "cache_hysteresis", "jev"])
+        self.assertTrue(all("work_shape" in body["questions"] for body in seen))
+        self.assertEqual(results[0]["proposed_model"], "gpt-6-luna")
+        self.assertNotIn("Rename", (self.root / "leases.json").read_text())
+
+    def test_v4_fails_safe_and_does_not_count_uncertain_downgrade(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v4"
+        config_path.write_text(json.dumps(config))
+        choices = iter(("mechanical", "unknown", "mechanical", "mechanical", "mechanical"))
+        router = self.new_router(lambda *args: {"answers": {"work_shape": {"choice": next(choices)},
+                                                           "effort": {"choice": "low"}}})
+        results = []
+        for i in range(5):
+            request = payload(f"Handle bounded low risk edit {i}", context_tokens=100_000)
+            request["current_model"] = "gpt-6-sol" if i == 0 else results[-1]["model"]
+            results.append(router.decide(request, session_id="v4-reset", native_selection=True))
+        self.assertEqual([item["model"] for item in results],
+                         ["gpt-6-sol", "gpt-6-sol", "gpt-6-sol", "gpt-6-sol", "gpt-6-luna"])
+        risky = router.decide(payload("Fix authentication vulnerability", context_tokens=100_000),
+                              session_id="v4-risk", native_selection=True)
+        self.assertEqual(risky["model"], "gpt-6-sol")
+        unavailable = self.new_router(lambda *args: (_ for _ in ()).throw(TimeoutError("unavailable")))
+        request = payload("Rename a local test variable", context_tokens=100_000)
+        request["current_model"] = "gpt-6-sol"
+        failed = unavailable.decide(request, session_id="v4-outage", native_selection=True)
+        self.assertEqual((failed["model"], failed["reason"]), ("gpt-6-sol", "jev_timeout"))
+
+    def test_v4_hot_cache_guards_small_context_without_affecting_manual_model(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v4"
+        config_path.write_text(json.dumps(config))
+        router = self.new_router(lambda *args: {"answers": {"work_shape": {"choice": "mechanical"},
+                                                           "effort": {"choice": "low"}}})
+        request = payload("Rename a local test variable", context_tokens=10_000)
+        request.update(current_model="gpt-6-sol", cached_input_pct=96)
+        held = router.decide(request, session_id="v4-hot", native_selection=True)
+        self.assertEqual((held["model"], held["reason"]), ("gpt-6-sol", "cache_hysteresis"))
+        manual = router.decide(payload("Rename a local test variable", model="gpt-6-terra"),
+                               session_id="v4-manual", native_selection=True)
+        self.assertEqual((manual["model"], manual["reason"]), ("gpt-6-terra", "concrete_model"))
+
     def test_v3_unknown_and_high_effort_stay_on_sol(self):
         config_path = self.root / "config.json"
         config = json.loads(config_path.read_text())

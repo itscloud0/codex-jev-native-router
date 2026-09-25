@@ -1,6 +1,6 @@
 {
   "auto_roles": ["luna", "terra", "sol"],
-  "auto_policy": "completion_v3",
+  "auto_policy": "completion_v4",
   "shadow_policy": "completion_v2",
   "effort_policy": "jev",
   "fixed_effort": "medium"

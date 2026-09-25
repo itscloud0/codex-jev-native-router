@@ -24,7 +24,7 @@ ROLES = ("luna", "terra", "sol", "astra")
 RANK = {role: index for index, role in enumerate(ROLES)}
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 ALIASES = {"jev-auto", "jev-shadow"}
-SHADOW_POLICIES = ("baseline", "completion_v1", "completion_v2", "completion_v3")
+SHADOW_POLICIES = ("baseline", "completion_v1", "completion_v2", "completion_v3", "completion_v4")
 MAX_TASK = 600
 MAX_DOSSIER = 1800
 CONTINUATION_TTL = 3600
@@ -304,7 +304,7 @@ class Router:
         profiles = completion_profiles if policy != "baseline" else baseline_profiles
         choices = {role: profiles[role] for role in ROLES if role in roles and RANK[role] >= RANK[floor]
                    and (requested_effort not in EFFORTS or requested_effort in roles[role]["efforts"])}
-        if policy == "completion_v3":
+        if policy in ("completion_v3", "completion_v4"):
             eligible = list(choices)
             work_shape = {"work_shape": {
                 "type": "choice",
@@ -399,7 +399,9 @@ class Router:
                                "turn_hash": str(value.get("turn_hash", ""))[:24], "turns": _bounded_int(value.get("turns")),
                                "updated": _bounded_time(value.get("updated")),
                                "anchor_shape": value.get("anchor_shape") if value.get("anchor_shape") in ("mechanical", "routine", "substantive") else None,
-                               "anchor_updated": _bounded_time(value.get("anchor_updated"))}
+                               "anchor_updated": _bounded_time(value.get("anchor_updated")),
+                               "downgrade_role": value.get("downgrade_role") if value.get("downgrade_role") in ROLES else None,
+                               "downgrade_streak": min(_bounded_int(value.get("downgrade_streak")), 3)}
             return result
         except (OSError, ValueError):
             return {}
@@ -483,7 +485,7 @@ class Router:
                                  "turn_hash": "", "turns": 0}
                 raw_floor = _floor(raw) if raw else "sol"
                 threshold = config.get("large_context_sol_floor_tokens", 48_000)
-                if isinstance(threshold, int) and not isinstance(threshold, bool) and threshold > 0 and _bounded_int(payload.get("context_tokens")) >= threshold:
+                if policy != "completion_v4" and isinstance(threshold, int) and not isinstance(threshold, bool) and threshold > 0 and _bounded_int(payload.get("context_tokens")) >= threshold:
                     raw_floor = "sol" if RANK[raw_floor] < RANK["sol"] else raw_floor
                 decision = self._decide_alias(payload, mode, roles, base, task, uncertain, turn_hash, lease, config, start, native_selection, raw_floor, policy)
                 decision["policy"] = policy
@@ -493,12 +495,15 @@ class Router:
                     if decision.get("reason") in ("lease", "continuation_lease") and lease:
                         anchor_shape = lease.get("anchor_shape")
                     leases[session] = {"model": decision["model"], "effort": decision["effort"], "role": decision.get("role", "sol"), "policy": policy, "turn_hash": turn_hash or (lease or {}).get("turn_hash", ""), "turns": decision.get("turns", 1), "updated": time.time(),
+                                       "downgrade_role": decision.get("downgrade_role"), "downgrade_streak": decision.get("downgrade_streak", 0),
                                        "anchor_shape": anchor_shape if anchor_shape in ("mechanical", "routine", "substantive") else None,
                                        "anchor_updated": lease.get("anchor_updated", 0) if decision.get("reason") in ("lease", "continuation_lease") and lease else time.time() if anchor_shape in ("mechanical", "routine", "substantive") else 0}
                     self._write_leases(dict(list(leases.items())[-500:]))
                 fcntl.flock(lock, fcntl.LOCK_UN)
                 decision.pop("role", None)
                 decision.pop("turns", None)
+                decision.pop("downgrade_role", None)
+                decision.pop("downgrade_streak", None)
                 return self._finalize(decision, start, client, payload)
         except Exception:
             return self._finalize({"model": base["slug"], "effort": _effort("medium", base), "mode": mode, "reason": "state_error", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
@@ -522,7 +527,8 @@ class Router:
         # Jev decides whether high-risk work needs Astra when it is allowed.
         floor = "sol" if raw_floor == "astra" else raw_floor if raw_floor in roles else next((role for role in ROLES if role in roles), "sol")
         context = payload.get("context_tokens")
-        if (mode == "auto" and policy == "completion_v3" and lease
+        if (mode == "auto" and policy in ("completion_v3", "completion_v4") and lease
+                and not (policy == "completion_v4" and lease.get("downgrade_streak"))
                 and lease.get("anchor_shape") in ("mechanical", "routine", "substantive")
                 and 0 <= time.time() - lease.get("anchor_updated", 0) < CONTINUATION_TTL
                 and _explicit_continuation(latest_user_text(payload))
@@ -565,7 +571,7 @@ class Router:
                 try:
                     deadline = min(max(float(config.get("timeout_seconds", 4)), 0.1), 4.0)
                     response = self.jev_client(body, deadline, Path(config.get("key_file", "~/.config/jev-codex-router/typesafe-api-key")))
-                    if policy == "completion_v3":
+                    if policy in ("completion_v3", "completion_v4"):
                         shape_question = "work_shape" in body["questions"]
                         shape = self._answer(response, "work_shape") if shape_question else None
                         target = ({"mechanical": "luna", "routine": "terra", "substantive": "sol", "unknown": "sol", "frontier": "astra"}.get(shape)
@@ -585,7 +591,7 @@ class Router:
                         candidate = self._answer(response, "capability")
                         candidate_effort = fixed_effort if fixed_effort in EFFORTS else self._answer(response, "effort")
                     if (candidate not in roles or RANK[candidate] < RANK[floor] or candidate_effort not in EFFORTS
-                            or (policy not in ("completion_v2", "completion_v3") and candidate not in body["questions"]["capability"]["criteria"])
+                            or (policy not in ("completion_v2", "completion_v3", "completion_v4") and candidate not in body["questions"]["capability"]["criteria"])
                             or (policy == "completion_v2" and candidate_effort not in roles[candidate]["efforts"])):
                         self._failures[policy] += 1
                         if self._failures[policy] >= 3:
@@ -595,7 +601,7 @@ class Router:
                     else:
                         if policy == "completion_v2":
                             receipt = self._choice_receipt(response, "route", pair)
-                        elif policy == "completion_v3":
+                        elif policy in ("completion_v3", "completion_v4"):
                             receipt = self._choice_receipt(response, "work_shape", shape) if shape else {}
                             if shape:
                                 receipt["work_shape"] = shape
@@ -628,8 +634,8 @@ class Router:
             reason = "privacy_fallback"
         elif self._open_until[policy] > time.monotonic():
             reason = "circuit_open"
-        # Preserve the stronger lease through failures. A lower role needs three
-        # distinct user turns and a short context, or an explicit new-task flag.
+        # Preserve the stronger lease through failures. V4 treats a long, hot
+        # context as switching cost, rather than excluding smaller models.
         if raw_floor == "astra" and EFFORTS.index(proposed_effort) < EFFORTS.index("high"):
             proposed_effort = "high"
         chosen_role = proposed_role
@@ -638,23 +644,36 @@ class Router:
         short = isinstance(context, int) and not isinstance(context, bool) and 0 <= context < 12000
         new_task = payload.get("jev_new_task") is True
         uncertain_route = reason in ("jev_error", "jev_timeout", "invalid_decision", "circuit_open", "privacy_fallback", "fallback")
+        downgrade_role = None
+        downgrade_streak = 0
         if previous_role == "astra" and uncertain_route:
             previous_role = None  # Jev failure must not silently continue spending Astra.
-        if previous_role in roles and RANK[previous_role] > RANK[chosen_role] and (uncertain_route or not (new_task or (turns >= 3 and short))):
-            chosen_role = previous_role
-            reason = "lease_hysteresis"
+        if previous_role in roles and RANK[previous_role] > RANK[chosen_role]:
+            if policy == "completion_v4":
+                threshold = config.get("large_context_sol_floor_tokens", 48_000)
+                long_context = isinstance(threshold, int) and not isinstance(threshold, bool) and threshold > 0 and isinstance(context, int) and not isinstance(context, bool) and context >= threshold
+                cache_hot = isinstance(payload.get("cached_input_pct"), int) and not isinstance(payload.get("cached_input_pct"), bool) and payload["cached_input_pct"] >= 80
+                if not uncertain_route and not new_task and (long_context or cache_hot):
+                    downgrade_role = chosen_role
+                    downgrade_streak = min(3, (lease.get("downgrade_streak", 0) if lease and lease.get("downgrade_role") == chosen_role else 0) + 1)
+                if uncertain_route or (downgrade_streak and downgrade_streak < 3):
+                    chosen_role = previous_role
+                    reason = "cache_hysteresis"
+            elif uncertain_route or not (new_task or (turns >= 3 and short)):
+                chosen_role = previous_role
+                reason = "lease_hysteresis"
         model = roles[chosen_role]
         effort = _effort(lease.get("effort", "medium"), model) if uncertain_route and previous_role == chosen_role and lease else _effort(proposed_effort, model)
-        proposed_model = model["slug"]
+        proposed_model = roles[proposed_role]["slug"] if policy == "completion_v4" and proposed_role in roles else model["slug"]
         proposed_effort = effort
         if mode == "shadow":
             decision = self._decision(base["slug"], _effort("medium", base), mode, "shadow_" + reason, previous, jev_ms, proposed_model, proposed_effort, "sol", turns)
-            return {**decision, **receipt}
+            return {**decision, **receipt, "downgrade_role": downgrade_role, "downgrade_streak": downgrade_streak}
         if not native_selection and model["slug"] != base["slug"] and not proxy_compatible(model, base):
             decision = self._decision(base["slug"], _effort("medium", base), mode, "requires_native_model_selection", previous, jev_ms, proposed_model, proposed_effort, "sol", turns)
             return {**decision, **receipt}
         decision = self._decision(model["slug"], effort, mode, reason, previous, jev_ms, proposed_model, proposed_effort, chosen_role, turns)
-        return {**decision, **receipt}
+        return {**decision, **receipt, "downgrade_role": downgrade_role, "downgrade_streak": downgrade_streak}
 
     @staticmethod
     def _decision(model: str, effort: str, mode: str, reason: str, previous: str | None, jev_ms: int, proposed_model: str | None, proposed_effort: str | None, role: str, turns: int) -> dict:
@@ -675,9 +694,9 @@ class Router:
             "reason": decision.get("reason") if decision.get("reason") in (
                 "concrete_model", "catalog_unavailable", "sol_catalog_unavailable", "cannot_route", "state_error",
                 "off", "lease", "continuation_lease", "fallback", "decision_cache", "jev", "jev_error", "jev_timeout", "invalid_decision", "privacy_fallback",
-                "circuit_open", "lease_hysteresis", "requires_native_model_selection",
+                "circuit_open", "lease_hysteresis", "cache_hysteresis", "requires_native_model_selection",
                 "shadow_fallback", "shadow_decision_cache", "shadow_jev", "shadow_jev_error", "shadow_jev_timeout", "shadow_invalid_decision",
-                "shadow_privacy_fallback", "shadow_circuit_open", "shadow_lease_hysteresis",
+                "shadow_privacy_fallback", "shadow_circuit_open", "shadow_lease_hysteresis", "shadow_cache_hysteresis",
             ) else None,
             "model": self._safe_model(decision.get("model")), "effort": decision.get("effort") if decision.get("effort") in EFFORTS else None,
             "proposed_model": self._safe_model(decision.get("proposed_model")), "proposed_effort": decision.get("proposed_effort") if decision.get("proposed_effort") in EFFORTS else None,
