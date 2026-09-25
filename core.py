@@ -27,6 +27,7 @@ ALIASES = {"jev-auto", "jev-shadow"}
 SHADOW_POLICIES = ("baseline", "completion_v1", "completion_v2", "completion_v3")
 MAX_TASK = 600
 MAX_DOSSIER = 1800
+CONTINUATION_TTL = 3600
 DEFAULT_CONFIG = Path("~/.local/share/jev-codex-router/config.json").expanduser()
 DEFAULT_CATALOG = Path("~/.local/share/jev-codex-router/native-models.json").expanduser()
 DEFAULT_STATE = Path("~/.local/share/jev-codex-router/state/leases.json").expanduser()
@@ -57,6 +58,14 @@ def _hash(value: str) -> str:
 def _bounded_int(value: Any) -> int:
     try:
         return max(0, min(int(value), 1_000_000_000))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _bounded_time(value: Any) -> float:
+    try:
+        number = float(value)
+        return min(max(number, 0), 4_000_000_000) if math.isfinite(number) else 0
     except (TypeError, ValueError, OverflowError):
         return 0
 
@@ -171,6 +180,15 @@ def _phase(task: str) -> str:
     if re.search(r"\b(plan|design|research|compare)\b", text):
         return "planning"
     return "implementation"
+
+
+def _explicit_continuation(raw: str) -> bool:
+    """Recognize only bare requests to resume the current task, never mixed instructions."""
+    return bool(re.fullmatch(
+        r"(?:continue(?: the (?:task|work))?|keep going|resume(?: the (?:task|work))?|"
+        r"продолжай(?: задачу| работу)?|продолжи(?: задачу| работу)?|давай дальше)",
+        raw.strip().lower().rstrip(".!?… "),
+    ))
 
 
 class Router:
@@ -377,7 +395,9 @@ class Router:
                 result[key] = {"model": value["model"][:64], "effort": value["effort"], "role": value["role"],
                                "policy": value.get("policy") if value.get("policy") in SHADOW_POLICIES else "baseline",
                                "turn_hash": str(value.get("turn_hash", ""))[:24], "turns": _bounded_int(value.get("turns")),
-                               "updated": min(max(float(value.get("updated", 0)), 0), 4_000_000_000)}
+                               "updated": _bounded_time(value.get("updated")),
+                               "anchor_shape": value.get("anchor_shape") if value.get("anchor_shape") in ("mechanical", "routine", "substantive") else None,
+                               "anchor_updated": _bounded_time(value.get("anchor_updated"))}
             return result
         except (OSError, ValueError):
             return {}
@@ -467,7 +487,12 @@ class Router:
                 decision["policy"] = policy
                 decision.update({"session": session, "turn_hash": turn_hash})
                 if mode != "off" and decision["mode"] != "off":
-                    leases[session] = {"model": decision["model"], "effort": decision["effort"], "role": decision.get("role", "sol"), "policy": policy, "turn_hash": turn_hash or (lease or {}).get("turn_hash", ""), "turns": decision.get("turns", 1), "updated": time.time()}
+                    anchor_shape = decision.get("work_shape") if decision.get("reason") in ("jev", "decision_cache", "lease_hysteresis") else None
+                    if decision.get("reason") in ("lease", "continuation_lease") and lease:
+                        anchor_shape = lease.get("anchor_shape")
+                    leases[session] = {"model": decision["model"], "effort": decision["effort"], "role": decision.get("role", "sol"), "policy": policy, "turn_hash": turn_hash or (lease or {}).get("turn_hash", ""), "turns": decision.get("turns", 1), "updated": time.time(),
+                                       "anchor_shape": anchor_shape if anchor_shape in ("mechanical", "routine", "substantive") else None,
+                                       "anchor_updated": lease.get("anchor_updated", 0) if decision.get("reason") in ("lease", "continuation_lease") and lease else time.time() if anchor_shape in ("mechanical", "routine", "substantive") else 0}
                     self._write_leases(dict(list(leases.items())[-500:]))
                 fcntl.flock(lock, fcntl.LOCK_UN)
                 decision.pop("role", None)
@@ -494,6 +519,23 @@ class Router:
             return self._decision(previous, lease["effort"], mode, "lease", previous, 0, None, None, previous_role, lease.get("turns", 1))
         # Jev decides whether high-risk work needs Astra when it is allowed.
         floor = "sol" if raw_floor == "astra" else raw_floor if raw_floor in roles else next((role for role in ROLES if role in roles), "sol")
+        context = payload.get("context_tokens")
+        if (mode == "auto" and policy == "completion_v3" and lease
+                and lease.get("anchor_shape") in ("mechanical", "routine", "substantive")
+                and 0 <= time.time() - lease.get("anchor_updated", 0) < CONTINUATION_TTL
+                and _explicit_continuation(latest_user_text(payload))
+                and not payload.get("jev_new_task")
+                and payload.get("requested_effort") not in EFFORTS
+                and config.get("effort_policy") != "fixed"
+                and previous_role in roles and previous_role != "astra"
+                and previous == roles[previous_role]["slug"]
+                and (native_selection or proxy_compatible(roles[previous_role], base))
+                and RANK[previous_role] >= RANK[floor]
+                and (previous_role == "sol" or (isinstance(context, int) and not isinstance(context, bool) and context >= 0))):
+            decision = self._decision(previous, lease["effort"], mode, "continuation_lease", previous, 0,
+                                      None, None, previous_role, lease.get("turns", 0) + 1)
+            decision["work_shape"] = lease["anchor_shape"]
+            return decision
         # Deterministic floor is applied even when Jev fails or its answer is invalid.
         fallback_role = "sol"
         if fallback_role not in roles:
@@ -623,7 +665,7 @@ class Router:
             "policy": decision.get("policy") if decision.get("policy") in SHADOW_POLICIES else None,
             "reason": decision.get("reason") if decision.get("reason") in (
                 "concrete_model", "catalog_unavailable", "sol_catalog_unavailable", "cannot_route", "state_error",
-                "off", "lease", "fallback", "decision_cache", "jev", "jev_error", "jev_timeout", "invalid_decision", "privacy_fallback",
+                "off", "lease", "continuation_lease", "fallback", "decision_cache", "jev", "jev_error", "jev_timeout", "invalid_decision", "privacy_fallback",
                 "circuit_open", "lease_hysteresis", "requires_native_model_selection",
                 "shadow_fallback", "shadow_decision_cache", "shadow_jev", "shadow_jev_error", "shadow_jev_timeout", "shadow_invalid_decision",
                 "shadow_privacy_fallback", "shadow_circuit_open", "shadow_lease_hysteresis",

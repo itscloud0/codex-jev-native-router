@@ -358,6 +358,7 @@ class InstallTests(unittest.TestCase):
             "prior_failed_turns": 0, "manual_overrides": 0, "nonzero_command_exits": 0})
         self.assertEqual(no_weights["routes"], {"decisions": 1, "switches": 1, "jev_ms": 25,
                                                  "proposed_models": {"gpt-6-astra": 1},
+                                                 "reasons": {},
                                                  "by_policy": {"unknown": {"decisions": 1,
                                                                             "proposed_models": {"gpt-6-astra": 1},
                                                                             "confidence": {"samples": 0, "mean": None}}}})

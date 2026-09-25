@@ -317,6 +317,83 @@ class RouterTest(unittest.TestCase):
         deep = router.decide(payload("Rename a local variable"), session_id="v3-deep", native_selection=True)
         self.assertEqual((deep["model"], deep["effort"]), ("gpt-6-sol", "high"))
 
+    def test_v3_explicit_continuation_reuses_bounded_task_anchor(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v3"
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(body)
+            return {"answers": {"work_shape": {"choice": "mechanical"},
+                                "effort": {"choice": "low"}}}
+        router = self.new_router(choose)
+        first = router.decide(payload("Rename a local test variable", context_tokens=1000),
+                              session_id="continuation", native_selection=True)
+        resumed = router.decide(payload("Продолжай.", context_tokens=2000),
+                                session_id="continuation", native_selection=True)
+        self.assertEqual((first["model"], resumed["model"], resumed["effort"]),
+                         ("gpt-6-luna", "gpt-6-luna", "low"))
+        self.assertEqual((resumed["reason"], resumed["work_shape"], resumed["jev_ms"]),
+                         ("continuation_lease", "mechanical", 0))
+        self.assertEqual(len(seen), 1)
+        state = (self.root / "leases.json").read_text()
+        self.assertNotIn("Rename", state)
+        self.assertNotIn("Продолжай", state)
+        router.record_usage(resumed, None, "ok", event="route")
+        self.assertEqual(json.loads((self.root / "telemetry.jsonl").read_text())["reason"], "continuation_lease")
+        changed = router.decide(payload("Implement an authentication change", context_tokens=3000),
+                                session_id="continuation", native_selection=True)
+        self.assertEqual(changed["model"], "gpt-6-sol")
+        self.assertEqual(len(seen), 2)
+
+    def test_v3_continuation_keeps_native_proxy_compatibility_gate(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v3"
+        config_path.write_text(json.dumps(config))
+        router = self.new_router(lambda *args: {"answers": {
+            "work_shape": {"choice": "mechanical"}, "effort": {"choice": "low"}}})
+        router.decide(payload("Rename a local test variable", context_tokens=1000),
+                      session_id="proxy-continuation", native_selection=True)
+        resumed = router.decide(payload("Continue the task", context_tokens=2000),
+                                session_id="proxy-continuation", native_selection=False)
+        self.assertEqual(resumed["model"], "gpt-6-sol")
+        self.assertEqual(resumed["reason"], "requires_native_model_selection")
+
+    def test_v3_continuation_respects_context_manual_and_anchor_age(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v3"
+        config_path.write_text(json.dumps(config))
+        seen = []
+        def choose(body, timeout, key_file):
+            seen.append(body)
+            return {"answers": {"work_shape": {"choice": "mechanical"},
+                                "effort": {"choice": "low"}}}
+        router = self.new_router(choose)
+        for session in ("long", "manual", "stale"):
+            router.decide(payload("Rename a local test variable", context_tokens=1000),
+                          session_id=session, native_selection=True)
+        long = router.decide(payload("Continue the task", context_tokens=50_000),
+                             session_id="long", native_selection=True)
+        self.assertEqual(long["model"], "gpt-6-sol")
+        self.assertNotEqual(long["reason"], "continuation_lease")
+        request = payload("Continue the task", context_tokens=2000)
+        request["current_model"] = "gpt-6-sol"
+        manual = router.decide(request, session_id="manual", native_selection=True)
+        self.assertEqual(manual["model"], "gpt-6-sol")
+        self.assertNotEqual(manual["reason"], "continuation_lease")
+        state = json.loads((self.root / "leases.json").read_text())
+        for lease in state.values():
+            if lease["model"] == "gpt-6-luna":
+                lease["anchor_updated"] = 1
+        (self.root / "leases.json").write_text(json.dumps(state))
+        stale = router.decide(payload("Continue the task", context_tokens=2000),
+                              session_id="stale", native_selection=True)
+        self.assertNotEqual(stale["reason"], "continuation_lease")
+        self.assertGreaterEqual(len(seen), 4)  # identical decisions may use the in-memory cache
+
     def test_v3_frontier_is_offered_only_when_astra_is_allowlisted(self):
         config_path = self.root / "config.json"
         config = json.loads(config_path.read_text())

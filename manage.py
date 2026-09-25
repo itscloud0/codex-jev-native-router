@@ -798,9 +798,13 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         bucket["efforts"][effort] = bucket["efforts"].get(effort, 0) + 1
         failures += row.get("status") in ("failed", "error")
     proposals: dict[str, int] = {}
+    reasons: dict[str, int] = {}
     by_policy: dict[str, dict] = {}
     jev_ms = 0
     for row in route_rows:
+        reason = row.get("reason")
+        if isinstance(reason, str) and reason:
+            reasons[reason] = reasons.get(reason, 0) + 1
         policy = row.get("policy") if row.get("policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3") else "unknown"
         policy_bucket = by_policy.setdefault(policy, {"decisions": 0, "proposed_models": {},
                                                       "confidence_samples": 0, "confidence_total": 0.0})
@@ -853,7 +857,7 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
                      },
                      "by_model": by_model, "by_client": by_client},
         "routes": {"decisions": len(route_rows), "switches": sum(row.get("switched") is True for row in route_rows),
-                   "jev_ms": jev_ms, "proposed_models": proposals, "by_policy": by_policy},
+                   "jev_ms": jev_ms, "proposed_models": proposals, "reasons": reasons, "by_policy": by_policy},
         "counterfactual": comparison,
         "note": "Token-hold-constant comparisons are sensitivity estimates, not Pro cost or quality-equivalent savings.",
     }
