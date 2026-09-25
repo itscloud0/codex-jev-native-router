@@ -1,18 +1,48 @@
+<div align="center">
+
+<img src="assets/router-banner.svg" alt="Codex Jev Native Router: bounded task signal, Jev work-shape and effort decision, local policy, native Codex executor" width="1100">
+
 # Codex Jev Native Router
 
-[![tests](https://github.com/itscloud0/codex-jev-native-router/actions/workflows/tests.yml/badge.svg)](https://github.com/itscloud0/codex-jev-native-router/actions/workflows/tests.yml)
+**A small decision layer for Codex Desktop and CLI. Codex still does the coding.**
 
-**Experimental, macOS-only.** This project routes authenticated Codex work by
-model and reasoning effort. It has passed local unit and limited live smoke tests;
-it has **not** demonstrated a particular ChatGPT Pro allowance saving or quality
-equivalence across broad software-engineering tasks. Desktop integration depends
-on an undocumented Codex launch override and should be rechecked after updates.
+[![CI](https://img.shields.io/github/actions/workflow/status/itscloud0/codex-jev-native-router/tests.yml?branch=main&style=flat-square&label=tests&logo=github)](https://github.com/itscloud0/codex-jev-native-router/actions/workflows/tests.yml)
+[![License](https://img.shields.io/github/license/itscloud0/codex-jev-native-router?style=flat-square)](LICENSE)
+![macOS](https://img.shields.io/badge/platform-macOS-1f6feb?style=flat-square&logo=apple)
+![Experimental](https://img.shields.io/badge/status-experimental-f59e0b?style=flat-square)
+[![Stars](https://img.shields.io/github/stars/itscloud0/codex-jev-native-router?style=flat-square)](https://github.com/itscloud0/codex-jev-native-router/stargazers)
+
+[How it works](#what-auto-actually-does) · [Install](#install-and-controls) · [Configure](#policy-configuration) · [Measure](#report) · [Limits](#limits)
+
+</div>
+
+> [!IMPORTANT]
+> **Experimental, macOS-only.** Local and CI tests pass, but quality-equivalent
+> ChatGPT Pro allowance savings have **not** been demonstrated. Desktop integration
+> depends on an undocumented Codex launch override and needs rechecking after updates.
+
+| Mode | Executor | What Jev does |
+| --- | --- | --- |
+| **Jev Auto** | Native Codex model selected for this turn | Classifies work shape and reasoning effort |
+| **Jev Shadow** | Sol | Records the route Auto would propose |
+| **Concrete model** | Your selection | Bypassed; manual choice wins |
+
+```text
+bounded task excerpt → Jev: work shape + effort → local policy: allowlist, risk, cache → native Codex
+                                      ↘ invalid / unavailable → Sol fallback
+```
+
+> [!NOTE]
+> The default Auto allowlist is Luna, Terra and Sol. Astra remains a manual
+> choice until its automatic use is justified by real outcome data. The
+> Desktop picker may show Medium for the alias; Auto chooses the executor's
+> actual effort separately. Inspect it with `jev-codex route THREAD_UUID`.
 
 Local, owner-only Codex model router. Desktop uses a native app-server stdio adapter for model selection; its executor connects directly to the official ChatGPT Codex endpoint. The CLI wrapper chooses a concrete native model and effort before Codex builds its session and uses a loopback Responses gateway for usage telemetry. Authentication stays with the built-in Codex OpenAI provider. Jev receives only a bounded, sanitized task excerpt; its key is read from an owner-only file passed at install time or `~/.config/jev-codex-router/typesafe-api-key`. The gateway does not forward Codex bearer headers to Jev.
 
 ## What Auto actually does
 
-`Jev Auto` is a picker alias, not an executor model. On each new Desktop user turn, the local policy checks the model allowlist, a bounded task excerpt, risk floor, prior route lease and context/cache hints. Jev normally proposes both a concrete model and reasoning effort. The policy validates them; Codex then executes the whole turn with that model, its native instructions, full conversation and existing ChatGPT login. Tool calls within the turn do not trigger another route. The CLI wrapper routes the initial prompt only; native interactive CLI and resumed turns are not automatically rerouted.
+`Jev Auto` is a picker alias, not an executor model. On each new Desktop user turn, the local policy checks the model allowlist, a bounded task excerpt, risk floor, prior route lease and context/cache hints. Under the default `completion_v4` policy, Jev answers two typed questions in one call: work shape (`mechanical`, `routine`, `substantive`, `unknown`, or `frontier` when Astra is allowed) and reasoning effort (`low`, `medium`, `high`, or `xhigh`). Local code maps the work shape to an eligible concrete model, validates capabilities and applies the switch guard. Codex then executes the whole turn with that model, its native instructions, full conversation and existing ChatGPT login. Tool calls within the turn do not trigger another route. The CLI wrapper routes the initial prompt only; native interactive CLI and resumed turns are not automatically rerouted.
 
 With `completion_v4`, Auto remembers only the previous work-shape category and native route for one hour. A bare "continue" or "продолжай" in the same Desktop task can reuse that route without another Jev call if the model remains allowed and no concrete-model switch or effort override occurred. New or mixed instructions use the normal routing policy. No task text, source, or tool output is stored in the route lease. This saves a Jev call and preserves model affinity; it does not establish Pro allowance savings. `jev-codex report` counts `continuation_lease` and `cache_hysteresis` decisions under `routes.reasons` and v4 work-shape categories under `routes.by_policy.completion_v4.work_shapes`.
 

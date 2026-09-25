@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Jev Native Router</title>
+  <desc id="desc">A bounded task signal flows through Jev and a local policy to a native Codex model.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#17243b"/>
+    </linearGradient>
+    <linearGradient id="accent" x2="1">
+      <stop stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#a3e635"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="32"/></filter>
+  </defs>
+  <rect width="1200" height="340" rx="24" fill="url(#background)"/>
+  <circle cx="1030" cy="52" r="125" fill="#0d9488" opacity=".22" filter="url(#glow)"/>
+  <circle cx="112" cy="314" r="130" fill="#84cc16" opacity=".13" filter="url(#glow)"/>
+  <path d="M0 268H1200M0 299H1200" stroke="#34445c" opacity=".35"/>
+  <text x="54" y="76" fill="#a3e635" font-family="ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18" font-weight="700" letter-spacing="3">CODEX  /  JEV</text>
+  <text x="54" y="139" fill="#f8fafc" font-family="ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="45" font-weight="750">Native model routing</text>
+  <text x="56" y="181" fill="#b6c5d7" font-family="ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="20">Small semantic decision. Local guardrails. Full Codex context.</text>
+  <g font-family="ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif">
+    <rect x="54" y="226" width="220" height="70" rx="14" fill="#1b2b42" stroke="#436077"/>
+    <text x="74" y="254" fill="#94a3b8" font-size="13" font-weight="700" letter-spacing="1">01  INPUT</text>
+    <text x="74" y="278" fill="#f8fafc" font-size="17" font-weight="650">Bounded task signal</text>
+    <path d="M280 261h33m-10-9 10 9-10 9" stroke="url(#accent)" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <rect x="320" y="226" width="220" height="70" rx="14" fill="#1b2b42" stroke="#436077"/>
+    <text x="340" y="254" fill="#94a3b8" font-size="13" font-weight="700" letter-spacing="1">02  JEV</text>
+    <text x="340" y="278" fill="#f8fafc" font-size="17" font-weight="650">Work shape + effort</text>
+    <path d="M546 261h33m-10-9 10 9-10 9" stroke="url(#accent)" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <rect x="586" y="226" width="220" height="70" rx="14" fill="#1b2b42" stroke="#436077"/>
+    <text x="606" y="254" fill="#94a3b8" font-size="13" font-weight="700" letter-spacing="1">03  POLICY</text>
+    <text x="606" y="278" fill="#f8fafc" font-size="17" font-weight="650">Validate + hold route</text>
+    <path d="M812 261h33m-10-9 10 9-10 9" stroke="url(#accent)" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <rect x="852" y="226" width="294" height="70" rx="14" fill="#12383b" stroke="#5eead4"/>
+    <text x="872" y="254" fill="#6ee7d4" font-size="13" font-weight="700" letter-spacing="1">04  EXECUTOR</text>
+    <text x="872" y="278" fill="#f8fafc" font-size="17" font-weight="650">Native Codex + ChatGPT auth</text>
+  </g>
+</svg>
