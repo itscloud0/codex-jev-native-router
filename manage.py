@@ -202,6 +202,64 @@ def desktop_wrapper_content(root: Path, native: Path, python: Path) -> bytes:
             + "exec " + " ".join(map(shlex.quote, [str(native), "-c", direct])) + ' "$@"\n').encode()
 
 
+def desktop_wrapper_issue(root: Path, manifest: dict, check_native: bool = True) -> str | None:
+    desktop = manifest.get("desktop", {})
+    if not desktop.get("enabled"):
+        return None
+    wrapper = Path(desktop.get("wrapper_path", root / "app-server-wrapper"))
+    if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+        return f"Desktop wrapper missing or not executable: {wrapper}"
+    expected = desktop_wrapper_content(root, Path(manifest["native_target"]),
+                                       Path(desktop.get("python", DESKTOP_PYTHON)))
+    if wrapper.read_bytes() != expected:
+        return (f"Desktop wrapper differs from manifest.native_target ({manifest['native_target']}); "
+                "it may be stale or manually edited. Refusing automatic overwrite")
+    native = Path(manifest["native_target"])
+    if check_native and (not native.is_file() or not os.access(native, os.X_OK)):
+        return f"Desktop wrapper points to missing or non-executable native_target: {native}"
+    return None
+
+
+def desktop_refresh_native(native: Path, root: Path = ROOT) -> dict:
+    """Refresh an owned Desktop wrapper after the app moves its bundled CLI."""
+    if not native.is_absolute() or not native.is_file() or not os.access(native, os.X_OK):
+        raise ValueError(f"new native Codex binary missing or not executable: {native}")
+    manifest_path = root / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    desktop = manifest.get("desktop", {})
+    if not desktop.get("enabled"):
+        raise ValueError("Desktop adapter is not enabled")
+    wrapper = Path(desktop.get("wrapper_path", root / "app-server-wrapper"))
+    if wrapper.is_symlink() or not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+        raise ValueError(f"Desktop wrapper missing, linked, or not executable: {wrapper}")
+    if desktop_env() != str(wrapper):
+        raise ValueError("CODEX_CLI_PATH changed outside router; refusing to overwrite")
+    issue = desktop_wrapper_issue(root, manifest, check_native=False)
+    if issue:
+        raise ValueError(issue)
+    old_content = wrapper.read_bytes()
+    if manifest["native_target"] == str(native):
+        return {"changed": False, "native_target": str(native)}
+    python = Path(desktop.get("python", DESKTOP_PYTHON))
+    new_content = desktop_wrapper_content(root, native, python)
+    backup = root / "backups" / ("desktop-native-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                                   + "-" + secrets.token_hex(4))
+    backup.mkdir(mode=0o700, parents=True)
+    atomic_write(backup / "manifest.json", manifest_bytes)
+    atomic_write(backup / "app-server-wrapper", old_content, 0o700)
+    if wrapper.read_bytes() != old_content or manifest_path.read_bytes() != manifest_bytes:
+        raise ValueError("Desktop files changed during refresh; refusing to overwrite")
+    manifest["native_target"] = str(native)
+    atomic_write(wrapper, new_content, 0o700)
+    try:
+        write_json(manifest_path, manifest)
+    except Exception:
+        atomic_write(wrapper, old_content, 0o700)
+        raise
+    return {"changed": True, "native_target": str(native), "backup": str(backup)}
+
+
 def desktop_env() -> str | None:
     result = subprocess.run(["launchctl", "getenv", "CODEX_CLI_PATH"], capture_output=True, text=True, timeout=2)
     if result.returncode:
@@ -415,6 +473,9 @@ def desktop_enable(root: Path = ROOT, agent_path: Path | None = None,
     if desktop.get("enabled"):
         if desktop_env() != str(wrapper):
             raise ValueError("CODEX_CLI_PATH changed outside router; refusing to overwrite")
+        issue = desktop_wrapper_issue(root, manifest)
+        if issue:
+            raise ValueError(issue)
         return
     if not python.is_file() or not os.access(python, os.X_OK):
         raise ValueError("Python 3.14 executable missing: " + str(python))
@@ -632,7 +693,7 @@ def health(root: Path) -> bool:
         return False
 
 
-def desktop_runtime() -> dict:
+def desktop_runtime(native_target: Path | None = None) -> dict:
     """Report active local Desktop transport without logging process arguments."""
     result = {"app_running": False, "adapter_active": False, "direct_native_app_server": False}
     try:
@@ -659,7 +720,12 @@ def desktop_runtime() -> dict:
                 if "rpc_adapter.py --native " in command and parent in apps}
     result["adapter_active"] = bool(adapters)
     for pid, (parent, command) in processes.items():
-        if not command.split()[0].endswith("/ChatGPT.app/Contents/Resources/codex") or "app-server" not in command:
+        executable = command.split()[0]
+        bundled_codex = ("/ChatGPT.app/Contents/Resources/" in executable and
+                         Path(executable).name == "codex")
+        if not (executable == str(native_target) if native_target else bundled_codex):
+            continue
+        if "app-server" not in command:
             continue
         if parent not in apps and parent not in adapters:
             continue
@@ -695,6 +761,9 @@ def status(root: Path = ROOT) -> dict:
         pass
     desktop = manifest.get("desktop", {})
     wrapper = desktop.get("wrapper_path", str(root / "app-server-wrapper"))
+    native_binary = Path(manifest["native_target"])
+    native_executable = native_binary.is_file() and os.access(native_binary, os.X_OK)
+    wrapper_issue = desktop_wrapper_issue(root, manifest)
     try:
         current_env = desktop_env()
     except (OSError, subprocess.TimeoutExpired):
@@ -706,9 +775,11 @@ def status(root: Path = ROOT) -> dict:
         "env_present": current_env is not None,
         "env_changed_externally": bool(desktop.get("env_changed_externally")),
         "wrapper_present": Path(wrapper).exists(),
+        "wrapper_matches_native_target": wrapper_issue is None,
+        "wrapper_issue": wrapper_issue,
         "launch_agent_present": Path(desktop.get("agent_path", DESKTOP_AGENT)).exists(),
         "limitation": "Desktop hostConfig.codex_cli_command overrides CODEX_CLI_PATH when set",
-        "runtime": desktop_runtime(),
+        "runtime": desktop_runtime(native_binary),
     }
     return {
         "mode": config["mode"], "config_state": manifest["config_state"], "health": health(root),
@@ -722,6 +793,8 @@ def status(root: Path = ROOT) -> dict:
         "port": config["port"], "catalog_models": len(catalog["models"]),
         "models": [x.get("slug") for x in catalog["models"] if x.get("slug", "").startswith("jev-")],
         "native_binary": manifest["native_target"],
+        "native_binary_executable": native_executable,
+        "native_binary_issue": None if native_executable else f"native_target missing or not executable: {native_binary}",
         "daemon": process,
         "desktop": desktop_status,
         "preserved_user_changes": manifest.get("preserved_user_changes", []),
@@ -743,6 +816,7 @@ def doctor(root: Path = ROOT) -> dict:
     native_binary = Path(manifest.get("native_target", ""))
     checks = {
         "native_binary_executable": native_binary.is_file() and os.access(native_binary, os.X_OK),
+        "desktop_wrapper_matches_native_target": desktop_wrapper_issue(root, manifest) is None,
         "managed_aliases_match_native_sol": aliases == expected_aliases,
         "gateway_healthy": current["health"],
         "desktop_adapter_active": (not current["desktop"]["runtime"]["app_running"]
@@ -760,7 +834,13 @@ def doctor(root: Path = ROOT) -> dict:
             checks["account_catalog_matches_installed"] = execution_view(refreshed) == execution_view(native)
         except (OSError, ValueError, TypeError):
             checks["account_catalog_matches_installed"] = False
-    return {"ok": all(checks.values()), "checks": checks,
+    issues = []
+    if not checks["native_binary_executable"]:
+        issues.append(f"native_target missing or not executable: {native_binary}")
+    wrapper_issue = desktop_wrapper_issue(root, manifest)
+    if wrapper_issue:
+        issues.append(wrapper_issue)
+    return {"ok": all(checks.values()), "checks": checks, "issues": issues,
             "note": "Static and local-process checks only. A native routed turn and built-in tools still need a smoke test after updates."}
 
 
@@ -1278,7 +1358,7 @@ def native_main() -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "evaluate", "trace", "route", "disable", "enable", "rollback", "update",
+    commands = {"install", "status", "doctor", "report", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
                 "desktop-enable", "desktop-disable"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1296,6 +1376,10 @@ def main() -> None:
             elif cmd == "enable": enable()
             elif cmd == "desktop-enable": desktop_enable()
             elif cmd == "desktop-disable": desktop_disable()
+            elif cmd == "desktop-refresh-native":
+                if len(argv) != 3 or argv[1] != "--native":
+                    raise ValueError("usage: jev-codex desktop-refresh-native --native /absolute/path/to/codex")
+                print(json.dumps(desktop_refresh_native(Path(argv[2])), indent=2))
             elif cmd == "rollback": rollback()
             elif cmd == "update": update_catalog()
             elif cmd == "status": print(json.dumps(status(), indent=2))

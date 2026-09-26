@@ -105,22 +105,79 @@ class InstallTests(unittest.TestCase):
 
     def test_desktop_runtime_distinguishes_direct_and_adapted_app_server(self):
         sample = """10 1 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
-11 10 /Applications/ChatGPT.app/Contents/Resources/codex -c x=y app-server
-12 10 /opt/homebrew/bin/python3.14 /tmp/rpc_adapter.py --native /Applications/ChatGPT.app/Contents/Resources/codex --root /tmp -- -c x=y app-server
-13 12 /Applications/ChatGPT.app/Contents/Resources/codex -c x=y app-server
+11 10 /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex -c x=y app-server
+12 10 /opt/homebrew/bin/python3.14 /tmp/rpc_adapter.py --native /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex --root /tmp -- -c x=y app-server
+13 12 /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex -c x=y app-server
 14 13 /opt/homebrew/bin/node_repl
-15 14 /opt/homebrew/bin/python3.14 /tmp/rpc_adapter.py --native /Applications/ChatGPT.app/Contents/Resources/codex --root /tmp -- app-server
+15 14 /opt/homebrew/bin/python3.14 /tmp/rpc_adapter.py --native /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex --root /tmp -- app-server
 """
+        native = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
         with mock.patch.object(manage.subprocess, "run", return_value=mock.Mock(stdout=sample)):
-            self.assertEqual(manage.desktop_runtime(), {"app_running": True,
+            self.assertEqual(manage.desktop_runtime(native), {"app_running": True,
                                                        "adapter_active": True,
                                                        "direct_native_app_server": True})
         sample = "\n".join(line for line in sample.splitlines() if not line.startswith("11 "))
         with mock.patch.object(manage.subprocess, "run", return_value=mock.Mock(stdout=sample)):
-            self.assertFalse(manage.desktop_runtime()["direct_native_app_server"])
+            self.assertFalse(manage.desktop_runtime(native)["direct_native_app_server"])
         sample = "\n".join(line for line in sample.splitlines() if not line.startswith("12 "))
         with mock.patch.object(manage.subprocess, "run", return_value=mock.Mock(stdout=sample)):
-            self.assertFalse(manage.desktop_runtime()["adapter_active"])
+            self.assertFalse(manage.desktop_runtime(native)["adapter_active"])
+
+    def test_desktop_refresh_native_after_app_update(self):
+        self.install()
+        self.mock_desktop_launchctl(None)
+        manage.desktop_enable(self.root, self.base / "desktop-env.plist", self.real)
+        wrapper = self.root / "app-server-wrapper"
+        old = self.real
+        new = self.base / "codex-cli" / "bin" / "codex"
+        new.parent.mkdir(parents=True)
+        new.write_text('#!/bin/sh\nprintf "new-native:%s\\n" "$*"\n')
+        new.chmod(0o700)
+        old.unlink()
+        with mock.patch.object(manage, "health", return_value=True):
+            before = manage.doctor(self.root)
+        self.assertFalse(before["checks"]["native_binary_executable"])
+        self.assertFalse(before["checks"]["desktop_wrapper_matches_native_target"])
+        self.assertIn("native_target missing", before["issues"][0])
+        self.assertIn("wrapper points to missing", before["issues"][1])
+        self.assertIn("native_target missing", manage.status(self.root)["native_binary_issue"])
+        result = manage.desktop_refresh_native(new, self.root)
+        self.assertTrue(result["changed"])
+        self.assertEqual(manage.load_json(self.root / "manifest.json")["native_target"], str(new))
+        self.assertTrue(manage.doctor(self.root)["checks"]["desktop_wrapper_matches_native_target"])
+        backup = Path(result["backup"])
+        self.assertEqual(manage.load_json(backup / "manifest.json")["native_target"], str(old))
+        self.assertIn(str(old).encode(), (backup / "app-server-wrapper").read_bytes())
+        (self.root / "rpc_adapter.py").unlink()  # Exercise the native fallback without starting the adapter.
+        run = subprocess.run([str(wrapper), "app-server"], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("new-native:", run.stdout)
+        manifest_bytes = (self.root / "manifest.json").read_bytes()
+        wrapper_bytes = wrapper.read_bytes()
+        backups = list((self.root / "backups").glob("desktop-native-*"))
+        self.assertFalse(manage.desktop_refresh_native(new, self.root)["changed"])
+        self.assertEqual((self.root / "manifest.json").read_bytes(), manifest_bytes)
+        self.assertEqual(wrapper.read_bytes(), wrapper_bytes)
+        self.assertEqual(list((self.root / "backups").glob("desktop-native-*")), backups)
+
+    def test_desktop_refresh_refuses_manually_edited_wrapper(self):
+        self.install()
+        self.mock_desktop_launchctl(None)
+        manage.desktop_enable(self.root, self.base / "desktop-env.plist", self.real)
+        wrapper = self.root / "app-server-wrapper"
+        wrapper.write_bytes(wrapper.read_bytes() + b"# owner change\n")
+        new = self.base / "new-codex"
+        new.write_text("binary")
+        new.chmod(0o700)
+        self.assertIn("manually edited", manage.status(self.root)["desktop"]["wrapper_issue"])
+        self.assertFalse(manage.doctor(self.root)["checks"]["desktop_wrapper_matches_native_target"])
+        with self.assertRaisesRegex(ValueError, "Refusing automatic overwrite"):
+            manage.desktop_enable(self.root)
+        with self.assertRaisesRegex(ValueError, "Refusing automatic overwrite"):
+            manage.desktop_refresh_native(new, self.root)
+        self.assertEqual(manage.load_json(self.root / "manifest.json")["native_target"], str(self.real))
+        self.assertIn(b"# owner change", wrapper.read_bytes())
+        self.assertFalse(list((self.root / "backups").glob("desktop-native-*")))
 
     def test_rollback_preserves_manual_model(self):
         self.install()
