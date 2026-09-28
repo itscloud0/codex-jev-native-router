@@ -155,7 +155,8 @@ def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20)
 
 
 def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
-              connected: threading.Event | None = None) -> None:
+              connected: threading.Event | None = None,
+              started_turn: threading.Event | None = None) -> None:
     try:
         connection, stream = _accept_authorized(listener, token)
     except TimeoutError as exc:
@@ -199,6 +200,12 @@ def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
                 raw = read_message(stream, connection)
                 if raw is None:
                     break
+                if started_turn is not None:
+                    try:
+                        if json.loads(raw).get("method") == "turn/start":
+                            started_turn.set()
+                    except (ValueError, UnicodeError, AttributeError):
+                        pass
                 try:
                     raw = adapter.client(raw)
                 except Exception:
@@ -264,16 +271,23 @@ def run(root: Path, native: Path, args: list[str]) -> int:
             listener.settimeout(20)
             token = secrets.token_urlsafe(32)
             connected = threading.Event()
-            bridge = threading.Thread(target=serve_one, args=(listener, root, native, token, connected), daemon=True)
+            started_turn = threading.Event()
+            bridge = threading.Thread(target=serve_one,
+                                      args=(listener, root, native, token, connected, started_turn), daemon=True)
             bridge.start()
             child = subprocess.Popen([str(native), "--remote", f"ws://127.0.0.1:{port}",
                                       "--remote-auth-token-env", "JEV_CODEX_BRIDGE_TOKEN", *args],
                                      stdin=None, stdout=None, stderr=None,
                                      env={**os.environ, "JEV_CODEX_BRIDGE_TOKEN": token})
             code = child.wait()
-            if code and not connected.is_set():
-                print("Jev TUI bridge: Codex exited before authenticating its local connection.",
+            if code and not started_turn.is_set():
+                stage = "before authenticating" if not connected.is_set() else "before starting a turn"
+                print(f"Jev TUI bridge: Codex exited {stage}; opening native Sol instead.",
                       file=sys.stderr, flush=True)
+                fallback = json.loads((root / "config.json").read_text()).get("fallback_model", "gpt-6-sol")
+                if not isinstance(fallback, str) or not re.fullmatch(r"gpt-\d+(?:\.\d+)*-sol", fallback):
+                    fallback = "gpt-6-sol"
+                return subprocess.call([str(native), *fallback_args(args, fallback)])
             return code
     except (OSError, ValueError) as exc:
         print(f"Jev TUI bridge unavailable: {exc}; starting native Sol.", file=sys.stderr)

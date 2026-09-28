@@ -3,9 +3,10 @@ from contextlib import redirect_stderr
 from pathlib import Path
 import socket
 import struct
+import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cli_bridge
 
@@ -99,14 +100,30 @@ class WebSocketTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertEqual(len(result), 1)
 
-    def test_native_exit_before_connection_has_diagnostic(self):
+    def test_native_exit_before_turn_falls_back_to_direct_sol(self):
         output = io.StringIO()
-        with (patch.object(cli_bridge.threading, "Thread"),
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.json").write_text('{"fallback_model":"gpt-6-sol"}')
+            with (patch.object(cli_bridge.threading, "Thread"),
+                  patch.object(cli_bridge.subprocess, "Popen") as popen,
+                  patch.object(cli_bridge.subprocess, "call", return_value=0) as direct,
+                  redirect_stderr(output)):
+                popen.return_value.wait.return_value = 1
+                self.assertEqual(cli_bridge.run(Path(directory), Path("/native"), ["resume"]), 0)
+            direct.assert_called_once_with(["/native", "-m", "gpt-6-sol", "resume"])
+        self.assertIn("opening native Sol", output.getvalue())
+
+    def test_exit_after_turn_does_not_restart_native_tui(self):
+        def mark_started(*args, **kwargs):
+            kwargs["args"][-1].set()
+            return Mock()
+
+        with (patch.object(cli_bridge.threading, "Thread", side_effect=mark_started),
               patch.object(cli_bridge.subprocess, "Popen") as popen,
-              redirect_stderr(output)):
+              patch.object(cli_bridge.subprocess, "call") as direct):
             popen.return_value.wait.return_value = 1
             self.assertEqual(cli_bridge.run(Path("/tmp"), Path("/native"), ["resume"]), 1)
-        self.assertIn("exited before authenticating", output.getvalue())
+        direct.assert_not_called()
 
 
 if __name__ == "__main__":
