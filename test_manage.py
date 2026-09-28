@@ -261,6 +261,18 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(resume[-2:], ["resume", "--last"])
             self.assertNotIn("-m", resume)
 
+    def test_pre_turn_client_only_replaces_unambiguous_interactive_auto(self):
+        self.install()
+        self.config.write_text(self.config.read_text().replace('model = "jev-shadow"', 'model = "jev-auto"'))
+        thread = "01a0cab0-65a9-7233-8a01-9e7df612e94b"
+        self.assertEqual(manage.cli_chat_args([], self.root), [])
+        self.assertEqual(manage.cli_chat_args(["resume", thread], self.root), ["--resume", thread])
+        self.assertIsNone(manage.cli_chat_args(["exec", "Fix tests"], self.root))
+        self.assertIsNone(manage.cli_chat_args(["-m", "gpt-6-sol"], self.root))
+        self.assertEqual(manage.cli_chat_args(["resume", "--last"], self.root), ["--last"])
+        self.config.write_text(self.config.read_text().replace('model = "jev-auto"', 'model = "gpt-6-sol"'))
+        self.assertIsNone(manage.cli_chat_args([], self.root))
+
     def test_startup_failure_restores_config_and_symlink(self):
         with mock.patch.object(manage, "start_agent", side_effect=RuntimeError("launch failed")), mock.patch.object(manage, "stop_agent"):
             with self.assertRaisesRegex(RuntimeError, "launch failed"):

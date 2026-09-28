@@ -337,7 +337,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         raise ValueError("TypeSafe key file missing or not owner-only")
     if agent_path.exists():
         raise ValueError("LaunchAgent already exists: " + str(agent_path))
-    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "cli_chat.py"):
         if not (source_dir() / filename).exists():
             raise ValueError("missing source: " + filename)
     original_text = config_path.read_text()
@@ -353,7 +353,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = root / "backups" / ("config-" + timestamp + ".toml")
     atomic_write(backup, original_text.encode())
-    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "cli_chat.py"):
         source = source_dir() / filename
         if not source.exists():
             raise ValueError("missing source: " + filename)
@@ -1384,9 +1384,31 @@ def native_main() -> None:
     os.execv(args[0], args)
 
 
+def cli_chat_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
+    """Use the pre-turn client only for unambiguous native interactive Auto launches."""
+    try:
+        manifest = load_json(root / "manifest.json")
+        config = load_json(root / "config.json")
+        codex_config = tomllib.loads(Path(manifest["config_path"]).read_text())
+        if (manifest.get("config_state") != "enabled" or config.get("mode") == "off"
+                or codex_config.get("model") != "jev-auto"):
+            return None
+    except (OSError, ValueError, KeyError):
+        return None
+    args = argv[1:] if argv[:1] == ["--jev-auto"] else argv
+    if not args:
+        return []
+    if len(args) == 2 and args[0] == "resume" and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", args[1]):
+        return ["--resume", args[1]]
+    if args == ["resume", "--last"]:
+        return ["--last"]
+    return None
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "cost", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
+    commands = {"install", "status", "doctor", "report", "cost", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
                 "desktop-enable", "desktop-disable"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1423,6 +1445,9 @@ def main() -> None:
                 from costs import cost_report
                 hours = int(argv[2]) if len(argv) == 3 else 168
                 print(json.dumps(cost_report(list(telemetry_rows(ROOT)), hours), indent=2))
+            elif cmd == "chat":
+                from cli_chat import run
+                raise SystemExit(run(argv[1:], ROOT))
             elif cmd == "evaluate":
                 options = argv[1:]
                 if len(options) % 2 or any(options[i] not in ("--hours", "--labels") for i in range(0, len(options), 2)) or len(set(options[::2])) != len(options) // 2:
@@ -1445,6 +1470,11 @@ def main() -> None:
     if not (ROOT / "manifest.json").exists():
         print("jev-codex is not installed", file=sys.stderr)
         raise SystemExit(1)
+    if invoked == "codex" and sys.stdin.isatty():
+        chat_args = cli_chat_args(argv)
+        if chat_args is not None:
+            from cli_chat import run
+            raise SystemExit(run(chat_args, ROOT))
     args = cli_args(argv, stdin_tty=sys.stdin.isatty())
     os.execv(args[0], args)
 

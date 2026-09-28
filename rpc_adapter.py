@@ -150,11 +150,13 @@ class IntentStore:
 
 
 class Adapter:
-    def __init__(self, root: Path, router: Router | None = None, store: IntentStore | None = None):
+    def __init__(self, root: Path, router: Router | None = None, store: IntentStore | None = None,
+                 client: str = "desktop"):
         self.root = root
         self.router = router or Router(root / "config.json", root / "native-models.json",
                                        root / "state/leases.json", root / "state/telemetry.jsonl")
         self.store = store or IntentStore(root / "state/desktop-intent.json")
+        self.client_name = client if client in ("desktop", "cli") else "desktop"
         self.pending: dict[str, dict] = {}
         self.active: set[str] = set()
         self.actual: dict[str, tuple[str, str]] = {}
@@ -222,7 +224,7 @@ class Adapter:
                 payload["cache_state"] = "hot" if cached_pct > 0 else "warming"
                 payload["cache_age_s"] = int(age)
         try:
-            decision = self.router.decide(payload, client="desktop", session_id=thread_id,
+            decision = self.router.decide(payload, client=self.client_name, session_id=thread_id,
                                           native_selection=True, mode_override="auto" if alias == "jev-auto" else "shadow")
             model, effort = decision.get("model"), decision.get("effort")
             if isinstance(model, str) and re.fullmatch(r"gpt-\d+(?:\.\d+)*-[a-z0-9]+", model) and isinstance(effort, str):
@@ -434,7 +436,7 @@ class Adapter:
                 usage = self.turn_usage.pop((thread_id, turn_id), None) if isinstance(turn_id, str) else None
                 saved = self.store.get(thread_id) or {}
                 model, effort = self.actual.get(thread_id, (saved.get("actual"), saved.get("effort")))
-                decision = {"model": model, "effort": effort, "client": "desktop",
+                decision = {"model": model, "effort": effort, "client": self.client_name,
                             "session": hashlib.sha256(thread_id.encode("utf-8", "replace")).hexdigest()[:24],
                             "turn_hash": hashlib.sha256(turn_id.encode("utf-8", "replace")).hexdigest()[:24]
                             if isinstance(turn_id, str) else "",
@@ -532,6 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--native", required=True)
     parser.add_argument("--root", required=True)
+    parser.add_argument("--client", choices=("desktop", "cli"), default="desktop")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     opts = parser.parse_args(argv)
     command = opts.command[1:] if opts.command[:1] == ["--"] else opts.command
@@ -547,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         subcommand += 2
     if subcommand >= len(command) or command[subcommand] != "app-server" or not stdio:
         os.execv(str(native), [str(native), *command])
-    adapter = Adapter(Path(opts.root))
+    adapter = Adapter(Path(opts.root), client=opts.client)
     child = subprocess.Popen([str(native), *command], stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=None, bufsize=65536)
     assert child.stdin is not None and child.stdout is not None

@@ -224,6 +224,27 @@ class AdapterTests(unittest.TestCase):
         self.adapter.server((json.dumps(completed) + '\n').encode())
         self.assertEqual(self.router.usage_records[-1][0][0]['route_id'], '')
 
+    def test_cli_client_routes_before_native_turn_with_cli_receipt(self):
+        adapter = rpc_adapter.Adapter(self.root, router=self.router, client='cli')
+        sent = json.loads(adapter.client(request('turn/start', {'threadId': 'cli-thread', 'model': 'jev-auto',
+            'input': [{'type': 'text', 'text': 'Rename a local variable'}]})))
+        self.assertEqual((sent['params']['model'], sent['params']['effort']), ('gpt-6-luna', 'low'))
+        self.assertEqual(self.router.calls[-1][1]['client'], 'cli')
+        receipt = self.router.usage_records[-1][0][0]
+        self.assertEqual(len(receipt['route_id']), 24)
+        adapter.server((json.dumps({'method': 'turn/completed', 'params': {
+            'threadId': 'cli-thread', 'turn': {'id': 'turn-1', 'status': 'completed'}}}) + '\n').encode())
+        completed = self.router.usage_records[-1][0][0]
+        self.assertEqual(completed['client'], 'cli')
+        self.assertEqual(completed['route_id'], receipt['route_id'])
+
+    def test_cli_turn_falls_back_to_sol_when_router_fails(self):
+        adapter = rpc_adapter.Adapter(self.root, router=self.router, client='cli')
+        self.router.decide = lambda *args, **kwargs: (_ for _ in ()).throw(OSError('Jev unavailable'))
+        sent = json.loads(adapter.client(request('turn/start', {'threadId': 'cli-fallback',
+            'model': 'jev-auto', 'input': [{'type': 'text', 'text': 'Fix a bug'}]})))
+        self.assertEqual((sent['params']['model'], sent['params']['effort']), ('gpt-6-sol', 'medium'))
+
     def test_desktop_weak_quality_signals_are_counts_only(self):
         self.adapter.store.update('t', alias='jev-auto', failed=True)
         self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-auto',
