@@ -1,5 +1,7 @@
 import io
+import socket
 import struct
+import threading
 import unittest
 
 import cli_bridge
@@ -63,6 +65,36 @@ class WebSocketTests(unittest.TestCase):
         cli_bridge._handshake(io.BytesIO(authorized), Sink(), "secret")
         with self.assertRaisesRegex(ValueError, "invalid WebSocket upgrade"):
             cli_bridge._handshake(io.BytesIO(good.replace(b"127.0.0.1", b"example.com")), Sink())
+
+    def test_stray_connection_does_not_consume_tui_bridge(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(2)
+            result = []
+
+            def accept():
+                connection, stream = cli_bridge._accept_authorized(listener, "test-token", timeout=2)
+                result.append(connection)
+                stream.close()
+
+            worker = threading.Thread(target=accept)
+            worker.start()
+            try:
+                with socket.create_connection(listener.getsockname()) as stray:
+                    stray.sendall(b"GET /bad HTTP/1.1\r\n\r\n")
+                with socket.create_connection(listener.getsockname()) as client:
+                    client.settimeout(2)
+                    client.sendall((f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{listener.getsockname()[1]}\r\n"
+                                    "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                    "Authorization: Bearer test-token\r\n\r\n").encode())
+                    self.assertIn(b"101 Switching Protocols", client.recv(256))
+            finally:
+                worker.join(timeout=3)
+                for connection in result:
+                    connection.close()
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(result), 1)
 
 
 if __name__ == "__main__":

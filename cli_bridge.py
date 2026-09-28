@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 
 from rpc_adapter import Adapter
 
@@ -125,19 +126,42 @@ def _handshake(stream, sock: socket.socket, token: str | None = None) -> None:
                   "Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n").encode("ascii"))
 
 
-def serve_one(listener: socket.socket, root: Path, native: Path, token: str) -> None:
-    connection, address = listener.accept()
-    _debug("accepted")
-    with connection:
-        if address[0] != "127.0.0.1":
-            return
+def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20) -> tuple[socket.socket, object]:
+    """Ignore stray local connections until the authenticated TUI connects."""
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Codex did not connect to the Jev bridge")
+        listener.settimeout(remaining)
+        try:
+            connection, address = listener.accept()
+        except socket.timeout as exc:
+            raise TimeoutError("Codex did not connect to the Jev bridge") from exc
+        _debug("accepted")
         stream = connection.makefile("rb")
         try:
+            if address[0] != "127.0.0.1":
+                raise ValueError("non-loopback connection")
+            connection.settimeout(min(remaining, 5))
             _handshake(stream, connection, token)
         except (OSError, UnicodeError, ValueError) as exc:
             _debug(f"handshake failed: {type(exc).__name__}")
-            return
-        _debug("connected")
+            stream.close()
+            connection.close()
+            continue
+        connection.settimeout(None)
+        return connection, stream
+
+
+def serve_one(listener: socket.socket, root: Path, native: Path, token: str) -> None:
+    try:
+        connection, stream = _accept_authorized(listener, token)
+    except TimeoutError as exc:
+        print(f"Jev TUI bridge: {exc}", file=sys.stderr, flush=True)
+        return
+    _debug("connected")
+    with connection, stream:
         child = subprocess.Popen([str(native), "app-server", "--listen", "stdio://"],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
         adapter = Adapter(root, client="cli")
