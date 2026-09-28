@@ -25,7 +25,12 @@ API_USD = {
     "gpt-6-luna": (0.10, 0.01, 0.50),
     "gpt-6-sol": (2, 0.20, 10),
     "gpt-6-astra": (10, 1, 50),
+    "gpt-5.6-luna": (0.20, 0.02, 1.20),
+    "gpt-5.6-terra": (2, 0.20, 12),
+    "gpt-5.6-sol": (4, 0.40, 20),
 }
+JEV_PAPER_INPUT_USD_PER_M = 0.042
+JEV_PAPER_URL = "https://arxiv.org/pdf/2609.29429v1"
 
 
 def _tokens(row: dict) -> tuple[int, int, int] | None:
@@ -70,10 +75,14 @@ def _view(rows: list[dict]) -> dict:
     }
 
 
-def cost_report(rows: list[dict], hours: int = 168) -> dict:
+def cost_report(rows: list[dict], hours: int = 168, since: float | None = None) -> dict:
     if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= 720:
         raise ValueError("hours must be between 1 and 720")
     cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - hours * 3600
+    if since is not None:
+        if not isinstance(since, (int, float)) or isinstance(since, bool) or since < 0:
+            raise ValueError("since must be a Unix timestamp")
+        cutoff = max(cutoff, since)
     rows = [row for row in rows if isinstance(row.get("ts"), (int, float)) and row["ts"] >= cutoff]
     routes = {row["route_id"]: row for row in rows
               if row.get("event") == "route" and row.get("mode") == "auto"
@@ -95,7 +104,7 @@ def cost_report(rows: list[dict], hours: int = 168) -> dict:
     jev_routes = [row for row in rows if row.get("event") == "route" and row.get("mode") in ("auto", "shadow")]
     metered = [row for row in jev_routes if isinstance(row.get("jev_input_tokens"), int) and isinstance(row.get("jev_output_tokens"), int)]
     return {
-        "window_hours": hours,
+        "window_hours": hours, "since": cutoff,
         "auto": {"route_decisions": len(routes), "linked_calls": len(linked),
                  "unlinked_decisions": len(routes) - len({row.get("route_id") for row in linked}),
                  "all_clients": _view(linked), "by_client": {key: _view(value) for key, value in sorted(clients.items())},
@@ -112,8 +121,41 @@ def cost_report(rows: list[dict], hours: int = 168) -> dict:
         "jev": {"route_decisions": len(jev_routes), "metered_requests": len(metered),
                 "input_tokens": sum(row["jev_input_tokens"] for row in metered),
                 "output_tokens": sum(row["jev_output_tokens"] for row in metered),
+                "paper_input_only_usd": round(sum(row["jev_input_tokens"] for row in metered)
+                                               * JEV_PAPER_INPUT_USD_PER_M / 1_000_000, 8),
+                "paper_rate_source": JEV_PAPER_URL,
                 "cost_usd": None, "cost_reason": "No public TypeSafe Jev tariff or billing export verified; old decisions did not record Jev tokens."},
         "sources": {"codex_credits": CODEX_CREDITS_URL, "api_usd": API_PRICES_URL,
                     "rate_card_checked": "2026-09-28", "tier": "standard_short_context"},
         "limits": "Same-token counterfactual, not quality-equivalent savings. Desktop may record only the last model call of a turn. Pro included usage is not a dollar charge; API rates are comparison units only. Fast/long-context rates are not applied.",
     }
+
+
+def format_savings(report: dict) -> str:
+    """Human-readable evidence and same-token counterfactual, without a savings claim."""
+    auto = report["auto"]
+    view = auto["all_clients"]
+    credits = view["codex_credit_equivalent"]
+    api = view["api_usd_equivalent"]
+    jev = report["jev"]
+    late = auto["unlinked_cli_gateway"]
+    priced = view["priced_calls"]
+    sol = credits["all_sol_same_tokens"]
+    pct = 100 * credits["vs_sol"] / sol if sol else None
+    period = (dt.datetime.fromtimestamp(report["since"], dt.timezone.utc).isoformat()
+              if report.get("since") is not None else f"last {report['window_hours']} hours")
+    lines = [
+        f"Period: {period}",
+        f"Auto routes: {auto['route_decisions']} | linked calls: {auto['linked_calls']} | priced: {priced} | missing usage/rate: {view['unpriced_calls']}",
+        f"Unlinked CLI gateway: {late['distinct_session_turns']} turns, {late['observed']['calls']} calls (excluded from comparison)",
+        (f"Codex credit-equivalent: routed {credits['observed_mix']:.4f} vs all-Sol {sol:.4f} vs all-Astra {credits['all_astra_same_tokens']:.4f}"
+         if priced else "Codex credit-equivalent: unavailable (no priced linked calls)"),
+        f"Same-token difference vs Sol: {credits['vs_sol']:+.4f} ({pct:+.1f}%)" if pct is not None else
+            "Same-token difference vs Sol: unavailable (no priced linked calls)",
+        (f"API price-equivalent: routed ${api['observed_mix']:.4f} vs all-Sol ${api['all_sol_same_tokens']:.4f} vs all-Astra ${api['all_astra_same_tokens']:.4f} (not billed API spend)"
+         if api["priced_calls"] else "API price-equivalent: unavailable (no priced linked calls)"),
+        f"Jev (Auto + Shadow): {jev['metered_requests']} metered decisions, {jev['input_tokens']} input / {jev['output_tokens']} output tokens; actual bill unknown",
+        f"Jev paper-rate input-only estimate: ${jev['paper_input_only_usd']:.8f} (research rate, not account billing)",
+        "Limit: same observed tokens, not a paired quality-equivalent comparison or measured Pro allowance savings.",
+    ]
+    return "\n".join(lines)

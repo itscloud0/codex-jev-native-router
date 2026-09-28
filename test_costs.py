@@ -1,7 +1,7 @@
 import time
 import unittest
 
-from costs import cost_report
+from costs import cost_report, format_savings
 
 
 class CostReportTests(unittest.TestCase):
@@ -23,6 +23,7 @@ class CostReportTests(unittest.TestCase):
         self.assertEqual(credits["all_sol_same_tokens"], 52.5)
         self.assertEqual(credits["vs_sol"], 49.875)
         self.assertEqual(result["jev"]["input_tokens"], 300)
+        self.assertEqual(result["jev"]["paper_input_only_usd"], 0.0000126)
         self.assertIsNone(result["jev"]["cost_usd"])
         self.assertEqual(result["observed_all_modes"]["calls"], 2)
 
@@ -52,6 +53,17 @@ class CostReportTests(unittest.TestCase):
         self.assertEqual(result["observed_all_modes"]["unpriced_calls"], 1)
         with self.assertRaises(ValueError):
             cost_report(rows, 0)
+
+    def test_since_excludes_older_routes_and_empty_window_has_no_savings_claim(self):
+        ts = int(time.time())
+        old = {"event": "route", "ts": ts - 3600, "mode": "auto", "route_id": "a" * 24}
+        report = cost_report([old], hours=24, since=ts - 60)
+        self.assertEqual(report["auto"]["route_decisions"], 0)
+        summary = format_savings(report)
+        self.assertIn("no priced linked calls", summary)
+        self.assertIn("actual bill unknown", summary)
+        with self.assertRaises(ValueError):
+            cost_report([], since=-1)
 
 
 if __name__ == "__main__":

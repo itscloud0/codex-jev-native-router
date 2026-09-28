@@ -1425,7 +1425,7 @@ def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "cost", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
+    commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
                 "desktop-enable", "desktop-disable"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1462,6 +1462,24 @@ def main() -> None:
                 from costs import cost_report
                 hours = int(argv[2]) if len(argv) == 3 else 168
                 print(json.dumps(cost_report(list(telemetry_rows(ROOT)), hours), indent=2))
+            elif cmd == "savings":
+                options = argv[1:]
+                if (len(options) % 2 or any(options[i] not in ("--hours", "--since") for i in range(0, len(options), 2))
+                        or len(set(options[::2])) != len(options) // 2):
+                    raise ValueError("usage: jev-codex savings [--hours 1..720] [--since ISO-8601-UTC]")
+                settings = dict(zip(options[::2], options[1::2]))
+                since = None
+                if "--since" in settings:
+                    try:
+                        since_date = dt.datetime.fromisoformat(settings["--since"].replace("Z", "+00:00"))
+                    except ValueError as exc:
+                        raise ValueError("--since must be an ISO-8601 timestamp with timezone") from exc
+                    if since_date.tzinfo is None:
+                        raise ValueError("--since must include a timezone")
+                    since = since_date.timestamp()
+                from costs import cost_report, format_savings
+                hours = int(settings.get("--hours", 720 if since is not None else 24))
+                print(format_savings(cost_report(list(telemetry_rows(ROOT)), hours, since)))
             elif cmd == "chat":
                 from cli_chat import run
                 raise SystemExit(run(argv[1:], ROOT))
