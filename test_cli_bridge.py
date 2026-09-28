@@ -1,8 +1,11 @@
 import io
+from contextlib import redirect_stderr
+from pathlib import Path
 import socket
 import struct
 import threading
 import unittest
+from unittest.mock import patch
 
 import cli_bridge
 
@@ -95,6 +98,15 @@ class WebSocketTests(unittest.TestCase):
                     connection.close()
             self.assertFalse(worker.is_alive())
             self.assertEqual(len(result), 1)
+
+    def test_native_exit_before_connection_has_diagnostic(self):
+        output = io.StringIO()
+        with (patch.object(cli_bridge.threading, "Thread"),
+              patch.object(cli_bridge.subprocess, "Popen") as popen,
+              redirect_stderr(output)):
+            popen.return_value.wait.return_value = 1
+            self.assertEqual(cli_bridge.run(Path("/tmp"), Path("/native"), ["resume"]), 1)
+        self.assertIn("exited before authenticating", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -154,12 +154,15 @@ def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20)
         return connection, stream
 
 
-def serve_one(listener: socket.socket, root: Path, native: Path, token: str) -> None:
+def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
+              connected: threading.Event | None = None) -> None:
     try:
         connection, stream = _accept_authorized(listener, token)
     except TimeoutError as exc:
         print(f"Jev TUI bridge: {exc}", file=sys.stderr, flush=True)
         return
+    if connected is not None:
+        connected.set()
     _debug("connected")
     with connection, stream:
         child = subprocess.Popen([str(native), "app-server", "--listen", "stdio://"],
@@ -260,13 +263,18 @@ def run(root: Path, native: Path, args: list[str]) -> int:
             port = listener.getsockname()[1]
             listener.settimeout(20)
             token = secrets.token_urlsafe(32)
-            bridge = threading.Thread(target=serve_one, args=(listener, root, native, token), daemon=True)
+            connected = threading.Event()
+            bridge = threading.Thread(target=serve_one, args=(listener, root, native, token, connected), daemon=True)
             bridge.start()
             child = subprocess.Popen([str(native), "--remote", f"ws://127.0.0.1:{port}",
                                       "--remote-auth-token-env", "JEV_CODEX_BRIDGE_TOKEN", *args],
                                      stdin=None, stdout=None, stderr=None,
                                      env={**os.environ, "JEV_CODEX_BRIDGE_TOKEN": token})
-            return child.wait()
+            code = child.wait()
+            if code and not connected.is_set():
+                print("Jev TUI bridge: Codex exited before authenticating its local connection.",
+                      file=sys.stderr, flush=True)
+            return code
     except (OSError, ValueError) as exc:
         print(f"Jev TUI bridge unavailable: {exc}; starting native Sol.", file=sys.stderr)
         try:
