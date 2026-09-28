@@ -530,6 +530,22 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(records[1]["route_id"], "")
         self.assertNotIn("private prompt", (self.root / "telemetry.jsonl").read_text())
 
+    def test_jev_usage_is_recorded_once_and_cache_is_not_billed_twice(self):
+        config_path = self.root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["auto_policy"] = "completion_v4"
+        config_path.write_text(json.dumps(config))
+        router = self.new_router(lambda *args: {"answers": {
+            "work_shape": {"choice": "mechanical"}, "effort": {"choice": "low"}},
+            "usage": {"input_tokens": 321, "output_tokens": 12}})
+        first = router.decide(payload("Rename a local variable"), session_id="meter-a", native_selection=True)
+        second = router.decide(payload("Rename a local variable"), session_id="meter-b", native_selection=True)
+        self.assertEqual((first["jev_input_tokens"], first["jev_output_tokens"]), (321, 12))
+        self.assertNotIn("jev_input_tokens", second)
+        router.record_usage(first, None, "ok", event="route")
+        record = json.loads((self.root / "telemetry.jsonl").read_text())
+        self.assertEqual((record["jev_input_tokens"], record["jev_output_tokens"]), (321, 12))
+
     def test_joint_shadow_rejects_unavailable_pair_without_execution_change(self):
         config_path = self.root / "config.json"
         config = json.loads(config_path.read_text())

@@ -337,7 +337,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         raise ValueError("TypeSafe key file missing or not owner-only")
     if agent_path.exists():
         raise ValueError("LaunchAgent already exists: " + str(agent_path))
-    for filename in ("manage.py", "core.py", "transport.py", "rpc_adapter.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py"):
         if not (source_dir() / filename).exists():
             raise ValueError("missing source: " + filename)
     original_text = config_path.read_text()
@@ -353,7 +353,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = root / "backups" / ("config-" + timestamp + ".toml")
     atomic_write(backup, original_text.encode())
-    for filename in ("manage.py", "core.py", "transport.py", "rpc_adapter.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py"):
         source = source_dir() / filename
         if not source.exists():
             raise ValueError("missing source: " + filename)
@@ -1386,7 +1386,7 @@ def native_main() -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
+    commands = {"install", "status", "doctor", "report", "cost", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
                 "desktop-enable", "desktop-disable"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1417,6 +1417,12 @@ def main() -> None:
                     raise ValueError("usage: jev-codex report [--weights path.json]")
                 weights = load_json(Path(argv[2])) if len(argv) == 3 else None
                 print(json.dumps(report(weights=weights), indent=2))
+            elif cmd == "cost":
+                if len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--hours"):
+                    raise ValueError("usage: jev-codex cost [--hours 1..720]")
+                from costs import cost_report
+                hours = int(argv[2]) if len(argv) == 3 else 168
+                print(json.dumps(cost_report(list(telemetry_rows(ROOT)), hours), indent=2))
             elif cmd == "evaluate":
                 options = argv[1:]
                 if len(options) % 2 or any(options[i] not in ("--hours", "--labels") for i in range(0, len(options), 2)) or len(set(options[::2])) != len(options) // 2:

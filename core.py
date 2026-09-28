@@ -557,6 +557,7 @@ class Router:
         proposed_effort = "medium"
         reason = "fallback"
         jev_ms = 0
+        jev_usage: dict = {}
         receipt: dict = {}
         if task and not uncertain and time.monotonic() >= self._open_until[policy]:
             fixed_effort = payload.get("requested_effort") if payload.get("requested_effort") in EFFORTS else config.get("fixed_effort") if config.get("effort_policy") == "fixed" else None
@@ -576,6 +577,12 @@ class Router:
                 try:
                     deadline = min(max(float(config.get("timeout_seconds", 4)), 0.1), 4.0)
                     response = self.jev_client(body, deadline, Path(config.get("key_file", "~/.config/jev-codex-router/typesafe-api-key")))
+                    usage = response.get("usage") if isinstance(response, dict) else None
+                    if isinstance(usage, dict):
+                        for source, target in (("input_tokens", "jev_input_tokens"), ("output_tokens", "jev_output_tokens")):
+                            value = usage.get(source)
+                            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10_000_000:
+                                jev_usage[target] = value
                     if policy in ("completion_v3", "completion_v4"):
                         shape_question = "work_shape" in body["questions"]
                         shape = self._answer(response, "work_shape") if shape_question else None
@@ -673,12 +680,12 @@ class Router:
         proposed_effort = effort
         if mode == "shadow":
             decision = self._decision(base["slug"], _effort("medium", base), mode, "shadow_" + reason, previous, jev_ms, proposed_model, proposed_effort, "sol", turns)
-            return {**decision, **receipt, "downgrade_role": downgrade_role, "downgrade_streak": downgrade_streak}
+            return {**decision, **receipt, **jev_usage, "downgrade_role": downgrade_role, "downgrade_streak": downgrade_streak}
         if not native_selection and model["slug"] != base["slug"] and not proxy_compatible(model, base):
             decision = self._decision(base["slug"], _effort("medium", base), mode, "requires_native_model_selection", previous, jev_ms, proposed_model, proposed_effort, "sol", turns)
-            return {**decision, **receipt}
+            return {**decision, **receipt, **jev_usage}
         decision = self._decision(model["slug"], effort, mode, reason, previous, jev_ms, proposed_model, proposed_effort, chosen_role, turns)
-        return {**decision, **receipt, "downgrade_role": downgrade_role, "downgrade_streak": downgrade_streak}
+        return {**decision, **receipt, **jev_usage, "downgrade_role": downgrade_role, "downgrade_streak": downgrade_streak}
 
     @staticmethod
     def _decision(model: str, effort: str, mode: str, reason: str, previous: str | None, jev_ms: int, proposed_model: str | None, proposed_effort: str | None, role: str, turns: int) -> dict:
@@ -706,6 +713,8 @@ class Router:
             "model": self._safe_model(decision.get("model")), "effort": decision.get("effort") if decision.get("effort") in EFFORTS else None,
             "proposed_model": self._safe_model(decision.get("proposed_model")), "proposed_effort": decision.get("proposed_effort") if decision.get("proposed_effort") in EFFORTS else None,
             "jev_ms": _bounded_int(decision.get("jev_ms")),
+            "jev_input_tokens": _bounded_int(decision.get("jev_input_tokens")) if isinstance(decision.get("jev_input_tokens"), int) and not isinstance(decision.get("jev_input_tokens"), bool) else None,
+            "jev_output_tokens": _bounded_int(decision.get("jev_output_tokens")) if isinstance(decision.get("jev_output_tokens"), int) and not isinstance(decision.get("jev_output_tokens"), bool) else None,
             "jev_confidence": decision.get("jev_confidence") if isinstance(decision.get("jev_confidence"), (int, float)) and not isinstance(decision.get("jev_confidence"), bool) and math.isfinite(decision["jev_confidence"]) and 0 <= decision["jev_confidence"] <= 1 else None,
             "jev_selected_probability": decision.get("jev_selected_probability") if isinstance(decision.get("jev_selected_probability"), (int, float)) and not isinstance(decision.get("jev_selected_probability"), bool) and math.isfinite(decision["jev_selected_probability"]) and 0 <= decision["jev_selected_probability"] <= 1 else None,
             "jev_model": decision.get("jev_model") if isinstance(decision.get("jev_model"), str) and re.fullmatch(r"jev-[a-z0-9.\-]{1,40}", decision["jev_model"]) else None,
