@@ -844,18 +844,35 @@ def doctor(root: Path = ROOT) -> dict:
             "note": "Static and local-process checks only. A native routed turn and built-in tools still need a smoke test after updates."}
 
 
+def telemetry_files(root: Path) -> list[Path]:
+    state = root / "state"
+    archives = sorted(state.glob("telemetry.*.jsonl"))
+    current = state / "telemetry.jsonl"
+    return archives + ([current] if current.is_file() else [])
+
+
+def telemetry_rows(root: Path, cutoff: float | None = None):
+    for path in telemetry_files(root):
+        try:
+            with path.open() as source:
+                for line in source:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    timestamp = row.get("ts")
+                    if cutoff is not None and isinstance(timestamp, (int, float)) and timestamp < cutoff:
+                        continue
+                    yield row
+        except FileNotFoundError:  # Rotation may finish after the file list is read.
+            continue
+
+
 def report(root: Path = ROOT, weights: dict | None = None) -> dict:
-    path = root / "state/telemetry.jsonl"
-    rows = []
-    if path.exists():
-        with path.open() as source:
-            for line in source:
-                try:
-                    row = json.loads(line)
-                    if isinstance(row, dict):
-                        rows.append(row)
-                except json.JSONDecodeError:
-                    continue
+    cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - 720 * 3600
+    rows = list(telemetry_rows(root, cutoff))
     usage_rows = [row for row in rows if row.get("event", "usage") == "usage"]
     route_rows = [row for row in rows if row.get("event") == "route"]
     by_model: dict[str, dict] = {}
@@ -915,39 +932,43 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         bucket["confidence"] = {"samples": samples, "mean": round(total / samples, 4) if samples else None}
     route_ids = {row.get("route_id"): row for row in route_rows
                  if isinstance(row.get("route_id"), str) and re.fullmatch(r"[a-f0-9]{24}", row["route_id"])}
-    linked_ids: set[str] = set()
+    linked: dict[str, list[dict]] = {}
     outcome_by_model: dict[str, dict] = {}
     outcome_by_shape: dict[str, dict] = {}
     outcome_by_policy: dict[str, dict] = {}
-    def add_outcome(buckets: dict, key: str, usage: dict) -> None:
+    def add_outcome(buckets: dict, key: str, calls: list[dict]) -> None:
         bucket = buckets.setdefault(key, {"turns": 0, "completed_turns": 0, "failed_turns": 0,
                                           "cancelled_turns": 0, "command_failures": 0,
-                                          "prior_failed_turns": 0, "usage_missing": 0,
+                                          "prior_failed_turns": 0, "usage_missing": 0, "model_calls": 0,
                                           "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0})
         bucket["turns"] += 1
-        bucket["completed_turns"] += usage.get("status") == "ok"
-        bucket["failed_turns"] += usage.get("status") == "error"
-        bucket["cancelled_turns"] += usage.get("status") == "cancelled"
-        bucket["prior_failed_turns"] += usage.get("prior_failed") is True
-        bucket["usage_missing"] += usage.get("usage_missing") is True
-        failures = usage.get("command_failures")
-        if isinstance(failures, int) and not isinstance(failures, bool) and 0 <= failures <= 255:
-            bucket["command_failures"] += failures
-        for field in ("input_tokens", "cached_input_tokens", "output_tokens"):
-            value = usage.get(field)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                bucket[field] += value
+        bucket["model_calls"] += len(calls)
+        bucket["completed_turns"] += calls[-1].get("status") == "ok"
+        bucket["failed_turns"] += calls[-1].get("status") == "error"
+        bucket["cancelled_turns"] += calls[-1].get("status") == "cancelled"
+        bucket["prior_failed_turns"] += any(call.get("prior_failed") is True for call in calls)
+        bucket["usage_missing"] += any(call.get("usage_missing") is True for call in calls)
+        for usage in calls:
+            failures = usage.get("command_failures")
+            if isinstance(failures, int) and not isinstance(failures, bool) and 0 <= failures <= 255:
+                bucket["command_failures"] += failures
+            for field in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                value = usage.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    bucket[field] += value
     for usage in usage_rows:
         route_id = usage.get("route_id")
         route = route_ids.get(route_id) if isinstance(route_id, str) else None
-        if (not route or route_id in linked_ids or route.get("session") != usage.get("session")
+        if (not route or route.get("session") != usage.get("session")
                 or route.get("client") != usage.get("client") or route.get("model") != usage.get("model")
                 or route.get("effort") != usage.get("effort")):
             continue
-        linked_ids.add(route_id)
-        add_outcome(outcome_by_model, str(route.get("model") or "unknown"), usage)
-        add_outcome(outcome_by_shape, str(route.get("work_shape") or "not_classified"), usage)
-        add_outcome(outcome_by_policy, str(route.get("policy") or "unknown"), usage)
+        linked.setdefault(route_id, []).append(usage)
+    for route_id, calls in linked.items():
+        route = route_ids[route_id]
+        add_outcome(outcome_by_model, str(route.get("model") or "unknown"), calls)
+        add_outcome(outcome_by_shape, str(route.get("work_shape") or "not_classified"), calls)
+        add_outcome(outcome_by_policy, str(route.get("policy") or "unknown"), calls)
     totals = {field: sum(row[field] for row in by_model.values()) for field in ("input_tokens", "cached_input_tokens", "output_tokens")}
     comparison: dict = {"token_hold_constant": totals, "weights_source": "none", "actual_units": None,
                         "all_sol_units": None, "all_astra_units": None}
@@ -968,6 +989,9 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         except (KeyError, TypeError, ValueError, ImportError):
             comparison["weights_source"] = "incomplete_user_weights"
     return {
+        "coverage": {"window_hours": 720, "files": len(telemetry_files(root)),
+                     "first_ts": min((row["ts"] for row in rows if isinstance(row.get("ts"), (int, float))), default=None),
+                     "last_ts": max((row["ts"] for row in rows if isinstance(row.get("ts"), (int, float))), default=None)},
         "observed": {"calls": len(usage_rows), "failures": failures,
                      "usage_missing_count": sum(row.get("usage_missing") is True for row in usage_rows),
                      "weak_quality_signals": {
@@ -982,11 +1006,11 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
         "routes": {"decisions": len(route_rows), "switches": sum(row.get("switched") is True for row in route_rows),
                    "jev_ms": jev_ms, "proposed_models": proposals, "reasons": reasons,
                    "model_bases": model_bases, "by_policy": by_policy,
-                   "outcomes": {"linked_turns": len(linked_ids), "unlinked_routes": len(route_rows) - len(linked_ids),
+                   "outcomes": {"linked_turns": len(linked), "unlinked_routes": len(route_rows) - len(linked),
                                 "by_model": outcome_by_model, "by_work_shape": outcome_by_shape,
                                 "by_policy": outcome_by_policy}},
         "counterfactual": comparison,
-        "note": "Linked turn status and command exits are weak signals, not task correctness; native last-call tokens may not cover the whole turn. Token-hold-constant comparisons are sensitivity estimates, not Pro cost or quality-equivalent savings.",
+        "note": "Linked CLI launches sum observed model calls; Desktop native usage may report only the last call of a turn. Completion and command exits are weak signals, not task correctness. Token-hold-constant comparisons are sensitivity estimates, not Pro cost or quality-equivalent savings.",
     }
 
 
@@ -995,19 +1019,18 @@ def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None
     if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= 24 * 30:
         raise ValueError("hours must be between 1 and 720")
     cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - hours * 3600
-    path = root / "state/telemetry.jsonl"
-    rows = []
-    if path.exists():
-        with path.open() as source:
-            for line in source:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict) and isinstance(row.get("ts"), (int, float)) and not isinstance(row["ts"], bool) and row["ts"] >= cutoff:
-                    rows.append(row)
+    rows = [row for row in telemetry_rows(root, cutoff)
+            if isinstance(row.get("ts"), (int, float)) and not isinstance(row["ts"], bool)]
     routes = [row for row in rows if row.get("event") == "route" and row.get("policy") == "completion_v4"
               and row.get("mode") in ("auto", "shadow")]
+    auto_calls = [row for row in rows if row.get("event") == "usage" and row.get("mode") == "auto"]
+    auto_models: dict[str, int] = {}
+    auto_clients: dict[str, int] = {}
+    for row in auto_calls:
+        model = row.get("model") if isinstance(row.get("model"), str) else "unknown"
+        client = row.get("client") if isinstance(row.get("client"), str) else "unknown"
+        auto_models[model] = auto_models.get(model, 0) + 1
+        auto_clients[client] = auto_clients.get(client, 0) + 1
     def counts(key: str, missing: str = "unknown") -> dict[str, int]:
         result: dict[str, int] = {}
         for row in routes:
@@ -1017,38 +1040,40 @@ def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None
         return dict(sorted(result.items()))
     route_ids = {row["route_id"]: row for row in routes
                  if isinstance(row.get("route_id"), str) and re.fullmatch(r"[a-f0-9]{24}", row["route_id"])}
-    linked: dict[str, dict] = {}
+    linked: dict[str, list[dict]] = {}
     for usage in rows:
         if usage.get("event") != "usage" or not isinstance(usage.get("route_id"), str):
             continue
         route_id = usage["route_id"]
         route = route_ids.get(route_id)
-        if (route is None or route_id in linked or route.get("session") != usage.get("session")
+        if (route is None or route.get("session") != usage.get("session")
                 or route.get("client") != usage.get("client") or route.get("model") != usage.get("model")
                 or route.get("effort") != usage.get("effort")):
             continue
-        linked[route_id] = usage
+        linked.setdefault(route_id, []).append(usage)
     outcomes: dict[str, dict] = {}
-    for route_id, usage in linked.items():
+    for route_id, calls in linked.items():
         model = route_ids[route_id]["model"]
         bucket = outcomes.setdefault(model, {"turns": 0, "ok": 0, "error": 0, "cancelled": 0,
-                                             "usage_missing": 0, "nonzero_command_exits": 0,
-                                             "last_call_input_tokens": 0, "last_call_cached_input_tokens": 0,
-                                             "last_call_output_tokens": 0})
+                                             "usage_missing": 0, "nonzero_command_exits": 0, "model_calls": 0,
+                                             "recorded_input_tokens": 0, "recorded_cached_input_tokens": 0,
+                                             "recorded_output_tokens": 0})
         bucket["turns"] += 1
-        status = usage.get("status")
+        bucket["model_calls"] += len(calls)
+        status = calls[-1].get("status")
         if status in ("ok", "error", "cancelled"):
             bucket[status] += 1
-        bucket["usage_missing"] += usage.get("usage_missing") is True
-        failures = usage.get("command_failures")
-        if isinstance(failures, int) and not isinstance(failures, bool) and 0 <= failures <= 255:
-            bucket["nonzero_command_exits"] += failures
-        for source_key, target_key in (("input_tokens", "last_call_input_tokens"),
-                                       ("cached_input_tokens", "last_call_cached_input_tokens"),
-                                       ("output_tokens", "last_call_output_tokens")):
-            value = usage.get(source_key)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                bucket[target_key] += value
+        bucket["usage_missing"] += any(call.get("usage_missing") is True for call in calls)
+        for usage in calls:
+            failures = usage.get("command_failures")
+            if isinstance(failures, int) and not isinstance(failures, bool) and 0 <= failures <= 255:
+                bucket["nonzero_command_exits"] += failures
+            for source_key, target_key in (("input_tokens", "recorded_input_tokens"),
+                                           ("cached_input_tokens", "recorded_cached_input_tokens"),
+                                           ("output_tokens", "recorded_output_tokens")):
+                value = usage.get(source_key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    bucket[target_key] += value
     human_outcomes: dict[str, dict[str, int]] = {}
     if labels_path is not None:
         if labels_path.stat().st_size > 1_000_000:
@@ -1074,7 +1099,10 @@ def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None
                 bucket = human_outcomes.setdefault(model, {"accepted": 0, "rework": 0, "failed": 0})
                 bucket[label["outcome"]] += 1
     return {
-        "policy": "completion_v4", "window_hours": hours, "routes": len(routes),
+        "policy": "completion_v4", "window_hours": hours, "files": len(telemetry_files(root)), "routes": len(routes),
+        "auto_model_calls": {"calls": len(auto_calls), "by_model": auto_models, "by_client": auto_clients,
+                             "gateway_blocks": sum(row.get("reason") == "requires_native_model_selection"
+                                                   for row in auto_calls)},
         "by_mode": counts("mode"), "by_client": counts("client"),
         "executed_models": counts("model"), "proposed_models": counts("proposed_model"),
         "reasons": counts("reason"), "work_shapes": counts("work_shape", "not_classified"),
@@ -1085,7 +1113,7 @@ def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None
         "human_labels": {"linked_labeled_turns": sum(sum(bucket.values()) for bucket in human_outcomes.values()),
                          "by_executed_model": human_outcomes},
         "quality_equivalent_savings": None,
-        "note": "Route counts are not task outcomes. Linked usage is the native last model call, not necessarily the whole turn. Command exits and turn status do not establish correctness. Human labels are local subjective outcomes, not paired counterfactuals. No quality-equivalent all-Sol or all-Astra savings estimate exists.",
+        "note": "Auto model calls are inferences, not user turns; gateway_blocks are late model proposals that could not safely change the native harness. Linked CLI launches sum observed calls; Desktop native usage may report only the last call of a turn. Command exits and turn status do not establish correctness. Human labels are local subjective outcomes, not paired counterfactuals. No quality-equivalent all-Sol or all-Astra savings estimate exists.",
     }
 
 
@@ -1107,40 +1135,33 @@ def trace(thread_id: str, root: Path = ROOT) -> dict:
     usage: dict[str, dict] = {}
     usage_events = 0
     last_executor: dict = {}
-    path = root / "state/telemetry.jsonl"
-    if path.exists():
-        with path.open() as source:
-            for line in source:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(row, dict) or row.get("session") != session:
-                    continue
-                if row.get("event") == "route":
-                    view = {key: row.get(key) for key in
-                            ("ts", "client", "mode", "policy", "model", "effort",
-                             "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms",
-                             "jev_confidence", "jev_selected_probability", "jev_model",
-                             "jev_effort_confidence", "work_shape", "model_basis")}
-                    route_id = row.get("route_id")
-                    view["route_id"] = route_id if isinstance(route_id, str) and re.fullmatch(r"[a-f0-9]{24}", route_id) else None
-                    routes.append(view)
-                    routes = routes[-64:]
-                elif row.get("event") == "usage":
-                    usage_events += 1
-                    key = str(row.get("model") or "unknown") + "/" + str(row.get("effort") or "unknown")
-                    bucket = usage.setdefault(key, {"calls": 0, "input_tokens": 0,
-                                                    "cached_input_tokens": 0, "output_tokens": 0})
-                    bucket["calls"] += 1
-                    for field in ("input_tokens", "cached_input_tokens", "output_tokens"):
-                        value = row.get(field)
-                        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                            bucket[field] += value
-                if row.get("event") in ("route", "usage"):
-                    last_executor = {"model": row.get("model"), "effort": row.get("effort"),
-                                     "event": row.get("event"), "ts": row.get("ts"),
-                                     "status": row.get("status")}
+    for row in telemetry_rows(root, dt.datetime.now(dt.timezone.utc).timestamp() - 720 * 3600):
+        if row.get("session") != session:
+            continue
+        if row.get("event") == "route":
+            view = {key: row.get(key) for key in
+                    ("ts", "client", "mode", "policy", "model", "effort",
+                     "proposed_model", "proposed_effort", "reason", "jev_ms", "router_ms",
+                     "jev_confidence", "jev_selected_probability", "jev_model",
+                     "jev_effort_confidence", "work_shape", "model_basis")}
+            route_id = row.get("route_id")
+            view["route_id"] = route_id if isinstance(route_id, str) and re.fullmatch(r"[a-f0-9]{24}", route_id) else None
+            routes.append(view)
+            routes = routes[-64:]
+        elif row.get("event") == "usage":
+            usage_events += 1
+            key = str(row.get("model") or "unknown") + "/" + str(row.get("effort") or "unknown")
+            bucket = usage.setdefault(key, {"calls": 0, "input_tokens": 0,
+                                            "cached_input_tokens": 0, "output_tokens": 0})
+            bucket["calls"] += 1
+            for field in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                value = row.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    bucket[field] += value
+        if row.get("event") in ("route", "usage"):
+            last_executor = {"model": row.get("model"), "effort": row.get("effort"),
+                             "event": row.get("event"), "ts": row.get("ts"),
+                             "status": row.get("status")}
     return {"thread_hash": session, "selection": intent, "routes": routes,
             "usage_events": usage_events, "executor_usage": usage, "last_executor": last_executor,
             "note": "Usage events are model calls, not user turns. A native concrete_model usage reason does not override a preceding Auto route."}
@@ -1171,7 +1192,7 @@ def _parse_cli(argv: list[str]) -> tuple[str, str | None, bool]:
                      "--remote-auth-token-env", "--local-provider"}
     safe_switches = {"--json", "--search", "--no-alt-screen", "--skip-git-repo-check", "--ephemeral",
                      "--ignore-rules", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
-                     "--approve-for-me", "--strict-config", "--all", "--last"}
+                     "--approve-for-me", "--strict-config", "--all", "--last", "--include-non-interactive", "--worktree"}
     native_commands = {"agents", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server",
                        "remote-control", "app", "completion", "update", "doctor", "sandbox", "debug", "apply",
                        "a", "resume", "queue", "archive", "delete", "migrate-rollouts", "unarchive", "fork",
@@ -1181,6 +1202,8 @@ def _parse_cli(argv: list[str]) -> tuple[str, str | None, bool]:
         item = argv[i]
         if item in ("exec", "e") and command == "interactive" and not positional:
             command = "exec"
+        elif item == "resume" and command == "interactive" and not positional:
+            command = "resume"
         elif item == "resume" and command == "exec" and not positional:
             command = "exec-resume"
         elif item == "--":
@@ -1219,6 +1242,8 @@ def _parse_cli(argv: list[str]) -> tuple[str, str | None, bool]:
         else:
             prompt = positional[1] if len(positional) == 2 else None
         return command, prompt, explicit
+    if command == "resume":
+        return command, None, explicit
     if command in ("interactive", "exec"):
         if len(positional) > 1:
             return "passthrough", None, True
@@ -1278,10 +1303,12 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
         return [native if healthy else bypass, *clean]
     if explicit:
         return [native if healthy else bypass, *endpoint, *clean]
+    if command == "resume":
+        return [native, *endpoint, *clean] if healthy else [bypass, "-m", sol, *clean]
     if prompt == "-":
-        return [native if healthy else bypass, *endpoint, "-m", sol, *clean]
+        return [native, *endpoint, "-m", "jev-auto", *clean] if healthy else [bypass, "-m", sol, *clean]
     if command == "interactive" and prompt is None:
-        return [native if healthy else bypass, *endpoint, "-m", sol, *clean]
+        return [native, *endpoint, "-m", "jev-auto", *clean] if healthy else [bypass, "-m", sol, *clean]
     if prompt is None:
         return [native if healthy else bypass, *endpoint, "-m", sol, *clean]
     if not enabled:
@@ -1290,7 +1317,7 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
         return [bypass, "-m", sol, *clean]
     if command == "exec-resume":
         return [native, *endpoint, *clean]
-    from core import Router
+    from core import Router, cli_route_id
     payload = {"model": "jev-auto", "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt[:12000]}]}]}
     try:
         router = Router(config_path=root / "config.json", catalog_path=root / "native-models.json",
@@ -1319,6 +1346,7 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
             effort = requested_effort
         decision["model"], decision["effort"] = model, effort
         decision["client"] = "cli"
+        decision["route_id"] = cli_route_id(route_token)
         router.record_usage(decision, None, "ok", event="route")
         extras = ["-m", model]
         if effort and not requested_effort:

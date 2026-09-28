@@ -213,6 +213,9 @@ class InstallTests(unittest.TestCase):
                 self.assertRegex(args[2], r'/cli/[0-9a-f]{16}"$')
                 token = args[2].rsplit('/', 1)[-1].rstrip('"')
                 self.assertEqual(decide.call_args.kwargs["session_id"], "cli-" + token)
+                from core import cli_route_id
+                recorded = json.loads((self.root / "state/telemetry.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(recorded["route_id"], cli_route_id(token))
                 self.assertEqual(args[3:7], ["-m", "gpt-6-sol", "-c", 'model_reasoning_effort="high"'])
                 self.assertIn("Fix tests", args)
                 self.assertEqual(decide.call_args.kwargs["mode_override"], "auto")
@@ -247,6 +250,16 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(native[-4:], ["-m", "gpt-6-sol", "exec", "Fix"])
         native = manage.native_args(["-c", "model_reasoning_effort=high", "exec", "Fix"], self.root)
         self.assertEqual(native[5:7], ["-m", "gpt-6-sol"])
+
+    def test_interactive_cli_keeps_local_auto_alias_and_resume(self):
+        self.install()
+        with mock.patch.object(manage, "health", return_value=True):
+            interactive = manage.cli_args([], self.root)
+            self.assertEqual(interactive[-2:], ["-m", "jev-auto"])
+            self.assertEqual(manage.cli_args(["exec", "-"], self.root)[-4:], ["-m", "jev-auto", "exec", "-"])
+            resume = manage.cli_args(["resume", "--last"], self.root)
+            self.assertEqual(resume[-2:], ["resume", "--last"])
+            self.assertNotIn("-m", resume)
 
     def test_startup_failure_restores_config_and_symlink(self):
         with mock.patch.object(manage, "start_agent", side_effect=RuntimeError("launch failed")), mock.patch.object(manage, "stop_agent"):
@@ -508,6 +521,31 @@ class InstallTests(unittest.TestCase):
             manage.evaluate(self.root, labels_path=labels)
         with self.assertRaises(ValueError):
             manage.evaluate(self.root, hours=0)
+
+    def test_reports_link_route_across_telemetry_rotation(self):
+        self.install()
+        now = int(time.time())
+        route = {"event": "route", "ts": now, "route_id": "a" * 24,
+                 "session": "b" * 24, "client": "desktop", "mode": "auto",
+                 "policy": "completion_v4", "model": "gpt-6-luna", "effort": "low"}
+        usage = {"event": "usage", "ts": now, "route_id": "a" * 24,
+                 "session": "b" * 24, "client": "desktop", "mode": "auto",
+                 "model": "gpt-6-luna", "effort": "low", "status": "ok",
+                 "input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 5}
+        state = self.root / "state"
+        (state / "telemetry.1.jsonl").write_text(json.dumps(route) + "\n")
+        (state / "telemetry.jsonl").write_text(json.dumps(usage) + "\n" +
+                                             json.dumps({**usage, "input_tokens": 50, "cached_input_tokens": 40,
+                                                         "output_tokens": 3}) + "\n")
+        self.assertEqual(manage.report(self.root)["routes"]["outcomes"]["linked_turns"], 1)
+        linked = manage.report(self.root)["routes"]["outcomes"]["by_model"]["gpt-6-luna"]
+        self.assertEqual((linked["model_calls"], linked["input_tokens"]), (2, 150))
+        evaluation = manage.evaluate(self.root, hours=24)
+        self.assertEqual((evaluation["routes"], evaluation["linked_turns"]), (1, 1))
+        self.assertEqual(evaluation["outcomes_by_executed_model"]["gpt-6-luna"]["model_calls"], 2)
+        self.assertEqual(evaluation["auto_model_calls"], {
+            "calls": 2, "by_model": {"gpt-6-luna": 2}, "by_client": {"desktop": 2},
+            "gateway_blocks": 0})
 
     def test_trace_explains_auto_route_without_prompt_data(self):
         self.install()

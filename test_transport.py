@@ -22,8 +22,8 @@ class FakeRouter:
         self.decision = {"model": "gpt-5.6-luna", "effort": "low", "mode": "auto",
                          "reason": "jev", "proposed_model": "gpt-5.6-luna"}
 
-    def decide(self, payload, client, session_id, native_selection=False):
-        self.calls.append((payload, client, session_id, native_selection))
+    def decide(self, payload, client, session_id, native_selection=False, mode_override=None):
+        self.calls.append((payload, client, session_id, native_selection, mode_override))
         return self.decision.copy()
 
     def record_usage(self, decision, usage, status):
@@ -134,7 +134,7 @@ class TransportTest(unittest.TestCase):
         original.pop("model")
         original["reasoning"].pop("effort")
         self.assertEqual(sent, original)
-        self.assertEqual(self.router.calls[0][1:], ("desktop", "thread-1", False))
+        self.assertEqual(self.router.calls[0][1:], ("desktop", "thread-1", False, "auto"))
         decision, usage, status = self.router.records[0]
         self.assertEqual((decision["reason"], decision["proposed_model"]),
                          ("requires_native_model_selection", "gpt-5.6-luna"))
@@ -167,6 +167,7 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(self.request("POST", path + "/responses", body, headers)[0], 200)
         self.assertEqual(self.router.calls[-1][1:3], ("cli", "cli-" + token))
         self.assertEqual(self.router.records[-1][0]["client"], "cli")
+        self.assertEqual(self.router.records[-1][0]["route_id"], transport.cli_route_id(token))
         self.assertEqual(self.request("POST", f"/{CAPABILITY}/cli/bad-token/responses", body, headers)[0], 404)
 
     def test_health_websocket_and_rejections(self):

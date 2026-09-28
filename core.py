@@ -55,6 +55,11 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:24]
 
 
+def cli_route_id(token: str) -> str:
+    """Pseudonymous route ID shared by a CLI launch and its gateway calls."""
+    return _hash("cli-route:" + token) if re.fullmatch(r"[0-9a-f]{16}", token) else ""
+
+
 def _bounded_int(value: Any) -> int:
     try:
         return max(0, min(int(value), 1_000_000_000))
@@ -724,12 +729,18 @@ class Router:
         try:
             self.telemetry_path.parent.mkdir(parents=True, exist_ok=True)
             os.chmod(self.telemetry_path.parent, 0o700)
-            if self.telemetry_path.exists() and self.telemetry_path.stat().st_size > 2_000_000:
-                rotated = self.telemetry_path.with_suffix(".1.jsonl")
-                os.replace(self.telemetry_path, rotated)
-            with self.telemetry_path.open("a") as f:
-                os.chmod(self.telemetry_path, 0o600)
-                f.write(json.dumps(record, separators=(",", ":")) + "\n")
+            lock_path = self.telemetry_path.with_suffix(".lock")
+            with lock_path.open("a") as lock:
+                os.chmod(lock_path, 0o600)
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if self.telemetry_path.exists() and self.telemetry_path.stat().st_size > 2_000_000:
+                    suffix = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                    rotated = self.telemetry_path.with_name(
+                        f"{self.telemetry_path.stem}.{suffix}.{os.getpid()}.{os.urandom(4).hex()}.jsonl")
+                    os.replace(self.telemetry_path, rotated)
+                with self.telemetry_path.open("a") as f:
+                    os.chmod(self.telemetry_path, 0o600)
+                    f.write(json.dumps(record, separators=(",", ":")) + "\n")
         except Exception:
             pass
 

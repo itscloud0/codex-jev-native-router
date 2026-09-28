@@ -764,6 +764,20 @@ class RouterTest(unittest.TestCase):
         parsed = json.loads(line)
         self.assertEqual((parsed["event"], parsed["client"]), ("route", "cli"))
 
+    def test_telemetry_rotation_preserves_existing_archives(self):
+        current = self.root / "telemetry.jsonl"
+        legacy = self.root / "telemetry.1.jsonl"
+        legacy.write_text('{"event":"legacy"}\n')
+        decision = self.router.decide(payload("Write a short greeting"), native_selection=True)
+        for _ in range(2):
+            current.write_text("x" * 2_000_001)
+            self.router.record_usage(decision, None, "ok")
+        archives = list(self.root.glob("telemetry.*.jsonl"))
+        self.assertEqual(len(archives), 3)
+        self.assertEqual(legacy.read_text(), '{"event":"legacy"}\n')
+        self.assertEqual(json.loads(current.read_text())["event"], "usage")
+        self.assertEqual(oct((self.root / "telemetry.lock").stat().st_mode & 0o777), "0o600")
+
 
 if __name__ == "__main__":
     unittest.main()
