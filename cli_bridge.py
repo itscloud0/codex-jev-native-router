@@ -166,17 +166,7 @@ def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20,
         return connection, stream
 
 
-def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
-              connected: threading.Event | None = None,
-              ready: threading.Event | None = None,
-              progress: dict | None = None) -> None:
-    try:
-        connection, stream = _accept_authorized(listener, token, ready=ready, progress=progress)
-    except TimeoutError as exc:
-        print(f"Jev TUI bridge: {exc}", file=sys.stderr, flush=True)
-        return
-    if connected is not None:
-        connected.set()
+def _serve_connection(connection: socket.socket, stream, root: Path, native: Path) -> None:
     _debug("connected")
     with connection, stream:
         child = subprocess.Popen([str(native), "app-server", "--listen", "stdio://"],
@@ -244,6 +234,46 @@ def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
                     child.wait()
 
 
+def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
+              connected: threading.Event | None = None,
+              ready: threading.Event | None = None,
+              progress: dict | None = None,
+              stopped: threading.Event | None = None) -> None:
+    """Serve the main TUI and its independent session-picker connections."""
+    stopped = stopped or threading.Event()
+    slots = threading.BoundedSemaphore(4)
+    first = True
+    while not stopped.is_set():
+        try:
+            connection, stream = _accept_authorized(
+                listener, token, timeout=20 if first else 1,
+                ready=ready if first else None, progress=progress if first else None)
+        except TimeoutError as exc:
+            if first and not stopped.is_set():
+                print(f"Jev TUI bridge: {exc}", file=sys.stderr, flush=True)
+                return
+            continue
+        except OSError:
+            return
+        if first:
+            first = False
+            if connected is not None:
+                connected.set()
+        if not slots.acquire(blocking=False):
+            _debug("connection limit reached")
+            stream.close()
+            connection.close()
+            continue
+
+        def worker(sock=connection, reader=stream) -> None:
+            try:
+                _serve_connection(sock, reader, root, native)
+            finally:
+                slots.release()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
 def fallback_args(args: list[str], model: str) -> list[str]:
     """Strip the synthetic alias so an unavailable bridge runs native Sol."""
     clean = []
@@ -279,9 +309,10 @@ def run(root: Path, native: Path, args: list[str]) -> int:
             token = secrets.token_urlsafe(32)
             connected = threading.Event()
             ready = threading.Event()
+            stopped = threading.Event()
             progress: dict = {"stage": "starting accept thread"}
             bridge = threading.Thread(target=serve_one,
-                                      args=(listener, root, native, token, connected, ready, progress), daemon=True)
+                                      args=(listener, root, native, token, connected, ready, progress, stopped), daemon=True)
             bridge.start()
             if not ready.wait(timeout=5):
                 raise TimeoutError("Jev bridge accept thread did not start")
@@ -290,6 +321,7 @@ def run(root: Path, native: Path, args: list[str]) -> int:
                                      stdin=None, stdout=None, stderr=None,
                                      env={**os.environ, "JEV_CODEX_BRIDGE_TOKEN": token})
             code = child.wait()
+            stopped.set()
             if code and not connected.is_set():
                 print(f"Jev TUI bridge: Codex exited before authentication; last stage: {progress['stage']}.",
                       file=sys.stderr, flush=True)

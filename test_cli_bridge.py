@@ -102,7 +102,7 @@ class WebSocketTests(unittest.TestCase):
     def test_native_exit_before_connection_has_diagnostic_without_restart(self):
         output = io.StringIO()
         def mark_ready(*args, **kwargs):
-            return Mock(start=lambda: kwargs["args"][-2].set())
+            return Mock(start=lambda: kwargs["args"][5].set())
 
         with (patch.object(cli_bridge.threading, "Thread", side_effect=mark_ready),
               patch.object(cli_bridge.subprocess, "Popen") as popen,
@@ -115,7 +115,7 @@ class WebSocketTests(unittest.TestCase):
 
     def test_exit_after_connection_does_not_restart_native_tui(self):
         def mark_connected(*args, **kwargs):
-            return Mock(start=lambda: (kwargs["args"][-3].set(), kwargs["args"][-2].set()))
+            return Mock(start=lambda: (kwargs["args"][4].set(), kwargs["args"][5].set()))
 
         with (patch.object(cli_bridge.threading, "Thread", side_effect=mark_connected),
               patch.object(cli_bridge.subprocess, "Popen") as popen,
@@ -145,6 +145,43 @@ class WebSocketTests(unittest.TestCase):
             self.assertTrue(ready.wait(timeout=1))
             worker.join(timeout=3)
             self.assertEqual(result, ["timeout"])
+
+    def test_picker_can_open_second_connection_while_main_tui_is_active(self):
+        release = threading.Event()
+        second = threading.Event()
+        served = []
+
+        def handler(sock, stream, root, native):
+            with sock, stream:
+                served.append(1)
+                if len(served) == 2:
+                    second.set()
+                release.wait(timeout=2)
+
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(4)
+            stopped = threading.Event()
+            with patch.object(cli_bridge, "_serve_connection", side_effect=handler):
+                server = threading.Thread(target=cli_bridge.serve_one,
+                                          args=(listener, Path("/tmp"), Path("/native"), "test-token"),
+                                          kwargs={"stopped": stopped})
+                server.start()
+                try:
+                    for _ in range(2):
+                        with socket.create_connection(listener.getsockname(), timeout=2) as client:
+                            client.settimeout(2)
+                            client.sendall((f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{listener.getsockname()[1]}\r\n"
+                                            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                                            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                            "Authorization: Bearer test-token\r\n\r\n").encode())
+                            self.assertIn(b"101 Switching Protocols", client.recv(256))
+                    self.assertTrue(second.wait(timeout=1))
+                finally:
+                    release.set()
+                    stopped.set()
+                    server.join(timeout=3)
+                self.assertFalse(server.is_alive())
 
 
 if __name__ == "__main__":
