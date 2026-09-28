@@ -337,7 +337,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         raise ValueError("TypeSafe key file missing or not owner-only")
     if agent_path.exists():
         raise ValueError("LaunchAgent already exists: " + str(agent_path))
-    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "cli_chat.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "cli_chat.py", "cli_bridge.py"):
         if not (source_dir() / filename).exists():
             raise ValueError("missing source: " + filename)
     original_text = config_path.read_text()
@@ -353,7 +353,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = root / "backups" / ("config-" + timestamp + ".toml")
     atomic_write(backup, original_text.encode())
-    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "cli_chat.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "cli_chat.py", "cli_bridge.py"):
         source = source_dir() / filename
         if not source.exists():
             raise ValueError("missing source: " + filename)
@@ -1384,26 +1384,43 @@ def native_main() -> None:
     os.execv(args[0], args)
 
 
-def cli_chat_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
-    """Use the pre-turn client only for unambiguous native interactive Auto launches."""
+def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
+    """Use the native TUI with pre-turn routing when an alias is selected."""
     try:
         manifest = load_json(root / "manifest.json")
         config = load_json(root / "config.json")
         codex_config = tomllib.loads(Path(manifest["config_path"]).read_text())
         if (manifest.get("config_state") != "enabled" or config.get("mode") == "off"
-                or codex_config.get("model") != "jev-auto"):
+                or not health(root) or _custom_transport(argv) or "--jev-off" in argv
+                or codex_config.get("model_provider", "openai") != "openai"
+                or codex_config.get("openai_base_url") not in (None, NATIVE_URL)):
             return None
     except (OSError, ValueError, KeyError):
         return None
-    args = argv[1:] if argv[:1] == ["--jev-auto"] else argv
-    if not args:
-        return []
-    if len(args) == 2 and args[0] == "resume" and re.fullmatch(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", args[1]):
-        return ["--resume", args[1]]
-    if args == ["resume", "--last"]:
-        return ["--last"]
-    return None
+    args = [arg for arg in argv if arg not in ("--jev-auto", "--jev-shadow")]
+    command, _, _ = _parse_cli(args)
+    if command not in ("interactive", "resume"):
+        return None
+    explicit = None
+    for index, arg in enumerate(args):
+        if arg in ("-m", "--model") and index + 1 < len(args):
+            explicit = args[index + 1]
+        elif arg.startswith("--model="):
+            explicit = arg.partition("=")[2]
+        elif arg in ("-c", "--config") and index + 1 < len(args):
+            name, sep, value = args[index + 1].partition("=")
+            if name == "model" and sep:
+                explicit = value.strip().strip("\"'")
+        elif arg.startswith("--config=model="):
+            explicit = arg.partition("model=")[2].strip().strip("\"'")
+    if explicit and explicit not in ("jev-auto", "jev-shadow"):
+        # Preserve a later /model -> Jev Auto switch in the same native TUI.
+        return args if codex_config.get("model") in ("jev-auto", "jev-shadow") else None
+    alias = ("jev-shadow" if "--jev-shadow" in argv else "jev-auto" if "--jev-auto" in argv
+             else explicit or codex_config.get("model"))
+    if alias not in ("jev-auto", "jev-shadow"):
+        return None
+    return args if explicit else ["-m", alias, *args]
 
 
 def main() -> None:
@@ -1471,10 +1488,11 @@ def main() -> None:
         print("jev-codex is not installed", file=sys.stderr)
         raise SystemExit(1)
     if invoked == "codex" and sys.stdin.isatty():
-        chat_args = cli_chat_args(argv)
-        if chat_args is not None:
-            from cli_chat import run
-            raise SystemExit(run(chat_args, ROOT))
+        bridge_args = cli_bridge_args(argv)
+        if bridge_args is not None:
+            from cli_bridge import run
+            manifest = load_json(ROOT / "manifest.json")
+            raise SystemExit(run(ROOT, Path(manifest["native_target"]), bridge_args))
     args = cli_args(argv, stdin_tty=sys.stdin.isatty())
     os.execv(args[0], args)
 

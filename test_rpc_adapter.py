@@ -68,6 +68,16 @@ class AdapterTests(unittest.TestCase):
             'input': [{'type': 'text', 'text': 'Review architecture'}]})))
         self.assertEqual(routed['params']['model'], 'gpt-6-astra')
 
+    def test_native_model_picker_can_return_from_concrete_to_auto(self):
+        self.adapter.client(request('thread/start', {'model': 'gpt-6-sol'}, 1))
+        self.adapter.server(response(1, {'thread': {'id': 'picker'}, 'model': 'gpt-6-sol'}))
+        changed = json.loads(self.adapter.client(request('thread/settings/update',
+            {'threadId': 'picker', 'model': 'jev-auto'}, 2)))
+        self.assertEqual(changed['params']['model'], 'gpt-6-sol')
+        turn = json.loads(self.adapter.client(request('turn/start', {'threadId': 'picker',
+            'model': 'jev-auto', 'input': [{'type': 'text', 'text': 'Fix typo'}]}, 3)))
+        self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-luna', 'low'))
+
     def test_passthrough(self):
         for raw in (b'{ "jsonrpc":"2.0", "method":"other", "params":{"secret":"x"} }\n',
                     b'{"jsonrpc":"2.0","id":55,"method":"approval","params":{"foo":1}}\n',
