@@ -101,19 +101,21 @@ class WebSocketTests(unittest.TestCase):
 
     def test_native_exit_before_connection_has_diagnostic_without_restart(self):
         output = io.StringIO()
-        with (patch.object(cli_bridge.threading, "Thread"),
+        def mark_ready(*args, **kwargs):
+            return Mock(start=lambda: kwargs["args"][-2].set())
+
+        with (patch.object(cli_bridge.threading, "Thread", side_effect=mark_ready),
               patch.object(cli_bridge.subprocess, "Popen") as popen,
               patch.object(cli_bridge.subprocess, "call") as direct,
               redirect_stderr(output)):
             popen.return_value.wait.return_value = 1
             self.assertEqual(cli_bridge.run(Path("/tmp"), Path("/native"), ["resume"]), 1)
         direct.assert_not_called()
-        self.assertIn("exited before authenticating", output.getvalue())
+        self.assertIn("last stage: starting accept thread", output.getvalue())
 
     def test_exit_after_connection_does_not_restart_native_tui(self):
         def mark_connected(*args, **kwargs):
-            kwargs["args"][-1].set()
-            return Mock()
+            return Mock(start=lambda: (kwargs["args"][-3].set(), kwargs["args"][-2].set()))
 
         with (patch.object(cli_bridge.threading, "Thread", side_effect=mark_connected),
               patch.object(cli_bridge.subprocess, "Popen") as popen,
@@ -121,6 +123,28 @@ class WebSocketTests(unittest.TestCase):
             popen.return_value.wait.return_value = 1
             self.assertEqual(cli_bridge.run(Path("/tmp"), Path("/native"), ["resume"]), 1)
         direct.assert_not_called()
+
+    def test_accept_thread_signals_ready_before_native_launch(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            ready = threading.Event()
+            result = []
+
+            def accept():
+                try:
+                    connection, stream = cli_bridge._accept_authorized(
+                        listener, "test-token", timeout=2, ready=ready)
+                    stream.close()
+                    connection.close()
+                except TimeoutError:
+                    result.append("timeout")
+
+            worker = threading.Thread(target=accept)
+            worker.start()
+            self.assertTrue(ready.wait(timeout=1))
+            worker.join(timeout=3)
+            self.assertEqual(result, ["timeout"])
 
 
 if __name__ == "__main__":

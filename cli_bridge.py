@@ -126,9 +126,15 @@ def _handshake(stream, sock: socket.socket, token: str | None = None) -> None:
                   "Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n").encode("ascii"))
 
 
-def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20) -> tuple[socket.socket, object]:
+def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20,
+                       ready: threading.Event | None = None,
+                       progress: dict | None = None) -> tuple[socket.socket, object]:
     """Ignore stray local connections until the authenticated TUI connects."""
     deadline = time.monotonic() + timeout
+    if progress is not None:
+        progress["stage"] = "waiting for connection"
+    if ready is not None:
+        ready.set()
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -139,6 +145,8 @@ def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20)
         except socket.timeout as exc:
             raise TimeoutError("Codex did not connect to the Jev bridge") from exc
         _debug("accepted")
+        if progress is not None:
+            progress["stage"] = "reading WebSocket handshake"
         stream = connection.makefile("rb")
         try:
             if address[0] != "127.0.0.1":
@@ -149,15 +157,21 @@ def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20)
             _debug(f"handshake failed: {type(exc).__name__}")
             stream.close()
             connection.close()
+            if progress is not None:
+                progress["stage"] = "waiting after rejected handshake"
             continue
         connection.settimeout(None)
+        if progress is not None:
+            progress["stage"] = "authenticated"
         return connection, stream
 
 
 def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
-              connected: threading.Event | None = None) -> None:
+              connected: threading.Event | None = None,
+              ready: threading.Event | None = None,
+              progress: dict | None = None) -> None:
     try:
-        connection, stream = _accept_authorized(listener, token)
+        connection, stream = _accept_authorized(listener, token, ready=ready, progress=progress)
     except TimeoutError as exc:
         print(f"Jev TUI bridge: {exc}", file=sys.stderr, flush=True)
         return
@@ -259,21 +273,25 @@ def run(root: Path, native: Path, args: list[str]) -> int:
     try:
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
-            listener.listen(1)
+            listener.listen(8)
             port = listener.getsockname()[1]
             listener.settimeout(20)
             token = secrets.token_urlsafe(32)
             connected = threading.Event()
+            ready = threading.Event()
+            progress: dict = {"stage": "starting accept thread"}
             bridge = threading.Thread(target=serve_one,
-                                      args=(listener, root, native, token, connected), daemon=True)
+                                      args=(listener, root, native, token, connected, ready, progress), daemon=True)
             bridge.start()
+            if not ready.wait(timeout=5):
+                raise TimeoutError("Jev bridge accept thread did not start")
             child = subprocess.Popen([str(native), "--remote", f"ws://127.0.0.1:{port}",
                                       "--remote-auth-token-env", "JEV_CODEX_BRIDGE_TOKEN", *args],
                                      stdin=None, stdout=None, stderr=None,
                                      env={**os.environ, "JEV_CODEX_BRIDGE_TOKEN": token})
             code = child.wait()
             if code and not connected.is_set():
-                print("Jev TUI bridge: Codex exited before authenticating its local connection.",
+                print(f"Jev TUI bridge: Codex exited before authentication; last stage: {progress['stage']}.",
                       file=sys.stderr, flush=True)
             return code
     except (OSError, ValueError) as exc:
