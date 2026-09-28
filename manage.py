@@ -746,6 +746,10 @@ def status(root: Path = ROOT) -> dict:
     shadow_policy = config.get("shadow_policy") if config.get("shadow_policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3", "completion_v4") else "baseline"
     auto_policy = config.get("auto_policy") if config.get("auto_policy") in ("baseline", "completion_v1", "completion_v2", "completion_v3", "completion_v4") else "baseline"
     catalog = load_json(root / "models.json")
+    from core import economical_roles, visible_roles
+    available = visible_roles(load_json(root / "native-models.json"))
+    effective_roles = economical_roles({role: available[role] for role in auto_roles if role in available},
+                                       config.get("allow_dominated_roles") is True)
     process: dict = {"pid": None, "rss_kib": None, "elapsed": None}
     try:
         out = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, text=True, timeout=2)
@@ -784,6 +788,8 @@ def status(root: Path = ROOT) -> dict:
     return {
         "mode": config["mode"], "config_state": manifest["config_state"], "health": health(root),
         "policy": {"config_file": str(root / "config.json"), "auto_roles": auto_roles,
+                   "effective_auto_roles": list(effective_roles),
+                   "allow_dominated_roles": config.get("allow_dominated_roles") is True,
                    "effort_policy": effort_policy,
                    "fixed_effort": fixed_effort,
                    "auto_policy": auto_policy,
@@ -840,6 +846,8 @@ def doctor(root: Path = ROOT) -> dict:
     wrapper_issue = desktop_wrapper_issue(root, manifest)
     if wrapper_issue:
         issues.append(wrapper_issue)
+    if checks.get("account_catalog_matches_installed") is False:
+        issues.append("account model cache differs from installed catalog; refresh native models before updating Jev")
     return {"ok": all(checks.values()), "checks": checks, "issues": issues,
             "note": "Static and local-process checks only. A native routed turn and built-in tools still need a smoke test after updates."}
 

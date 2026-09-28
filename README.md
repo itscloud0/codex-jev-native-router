@@ -28,12 +28,15 @@
 | **Concrete model** | Your selection | Bypassed; manual choice wins |
 
 > [!NOTE]
-> The default Auto allowlist is Luna, Terra and Sol. Astra remains a manual
+> The default Auto allowlist is Luna, Terra and Sol; the current credit-rate
+> guard excludes dominated Terra when GPT-6 Sol is available. Astra remains a manual
 > choice until its automatic use is justified by real outcome data. The
 > Desktop picker may show Medium for the alias; Auto chooses the executor's
 > actual effort separately. Inspect it with `jev-codex route THREAD_UUID`.
 
 Local, owner-only Codex model router. Desktop uses an app-server stdio adapter. Interactive CLI uses the original Codex TUI through its supported `--remote` connection, bridged locally to the same adapter. Both select model and effort before each turn; the native executor connects directly to the official ChatGPT Codex endpoint. `codex exec PROMPT` selects a concrete native model before launch and uses a loopback Responses gateway for usage telemetry. Authentication stays with the built-in Codex OpenAI provider. Jev receives only a bounded, sanitized task excerpt; its key is read from an owner-only file passed at install time or `~/.config/jev-codex-router/typesafe-api-key`. The gateway does not forward Codex bearer headers to Jev.
+
+The sanitizer retains a clear instruction before an unfenced code appendix and removes the code, paths, URLs, and credential-like values before calling Jev. If the instruction is absent or most meaning is redacted, Auto uses Sol locally. The global `mode` is a kill switch when set to `off`; otherwise the selected `Jev Auto` or `Jev Shadow` alias determines the mode for that turn.
 
 ## What Auto actually does
 
@@ -96,7 +99,7 @@ Edit `~/.local/share/jev-codex-router/config.json` (owner-only), then restart th
 }
 ```
 
-`auto_roles` is the executor allowlist and must include Sol. Add `"astra"` to let Jev choose Astra automatically, without a confirmation window; the default excludes it. Jev chooses only from roles available in the authenticated Codex model catalog and permitted by this list. High-risk work has a Sol floor and at least high effort; Jev may upgrade it to Astra when Astra is allowed. If Jev fails, the route falls back to Sol rather than spending Astra. `effort_policy` is `jev` or `fixed`; `fixed_effort` accepts `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. A concrete model choice overrides routing and the allowlist. An explicit CLI effort flag can still constrain a CLI Auto launch; Desktop picker effort does not constrain Jev Auto.
+`auto_roles` is the executor allowlist and must include Sol. Add `"astra"` to let Jev choose Astra automatically, without a confirmation window; the default excludes it. Jev chooses only from roles available in the authenticated Codex model catalog and permitted by this list. Auto excludes a weaker role when the dated Codex credit rate card shows Sol is no dearer for uncached input, cached input, and output; currently this removes GPT-5.6 Terra when GPT-6 Sol is available. `jev-codex status` shows `effective_auto_roles`. Set `"allow_dominated_roles": true` to retain an allowed role for a measured latency or quality reason. Update the rate card as prices change. High-risk work has a Sol floor and at least high effort; Jev may upgrade it to Astra when Astra is allowed. If Jev fails, the route falls back to Sol rather than spending Astra. `effort_policy` is `jev` or `fixed`; `fixed_effort` accepts `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. A concrete model choice overrides routing and the allowlist. An explicit CLI effort flag can still constrain a CLI Auto launch; Desktop picker effort does not constrain Jev Auto.
 
 `large_context_sol_floor_tokens` defaults to 48,000. Under v4 it marks a context where switching away from a stronger model needs three consecutive, distinct Jev recommendations for the same cheaper role. A measured cached-input ratio of at least 80% triggers the same guard even below that size. It does **not** remove Luna/Terra from Jev's choices. Failed, invalid, or `unknown` decisions reset the streak; capability upgrades happen immediately. Set the threshold to `0` to disable the context-size trigger, while the cache trigger remains. Earlier policies still use this setting as an absolute Sol floor. The three-turn guard is a conservative heuristic, not a calibrated optimum; compare correction and retry rates before claiming savings.
 On returning from an explicitly selected concrete model, Desktop passes the last actual executor to the local policy so an older Auto lease cannot silently treat the session as still running on Luna. Only the model identifier enters this local signal; it is not sent as raw conversation content.

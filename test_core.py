@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from core import Router, _floor, latest_user_text, sanitize_task, visible_roles
+from core import Router, _floor, economical_roles, latest_user_text, sanitize_task, visible_roles
 
 
 def catalog():
@@ -116,7 +116,9 @@ class RouterTest(unittest.TestCase):
         self.assertNotIn("abc123", clean)
         self.assertNotIn("A" * 20, clean)
         self.assertEqual(sanitize_task("Please review this:\n-----BEGIN PRIVATE KEY-----\nPRIVATEBODY\n-----END PRIVATE KEY-----"), ("", True))
-        self.assertEqual(sanitize_task("Fix this code:\ndef handler(req):\n    return req"), ("", True))
+        code_excerpt, code_uncertain = sanitize_task("Fix this code:\ndef handler(req):\n    return req")
+        self.assertTrue(code_uncertain)
+        self.assertNotIn("handler(req)", code_excerpt)
         fenced, uncertain = sanitize_task("```text\nPrivate project instructions and source\n```\nPlease inspect this")
         self.assertTrue(uncertain)
         self.assertNotIn("Private project", fenced)
@@ -124,6 +126,27 @@ class RouterTest(unittest.TestCase):
             {"role": "user", "content": "Please fix the button"},
             {"role": "user", "content": "<environment_context>private host</environment_context>"},
         ]}), "Please fix the button")
+
+    def test_clear_instruction_survives_redacted_paths_and_code_appendix(self):
+        raw = ("Update the parser so missing records are skipped, and preserve the existing output format. "
+               "Check /private/one.py, /private/two.py, and /private/three.py.\n"
+               "def parse(hidden_value):\n    return hidden_value")
+        clean, uncertain = sanitize_task(raw)
+        self.assertFalse(uncertain)
+        self.assertIn("Update the parser", clean)
+        for private in ("/private/", "hidden_value", "return hidden_value"):
+            self.assertNotIn(private, clean)
+        result = self.router.decide(payload(raw), native_selection=True, session_id="safe-excerpt")
+        self.assertEqual(result["reason"], "jev")
+        self.assertEqual(self.calls[-1]["state"]["task"], clean)
+
+    def test_code_first_or_secret_heavy_input_remains_local(self):
+        for raw in ("def parse(secret):\n    return secret\nPlease fix it",
+                    "Please inspect this: token=abc123 password=def456 /private/file.py",
+                    "Please inspect this:\n-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----"):
+            clean, uncertain = sanitize_task(raw)
+            self.assertTrue(uncertain)
+            self.assertNotIn("return secret", clean)
 
     def test_concrete_model_passes_without_jev_or_normalization(self):
         p = payload("Fix parser", "gpt-5.6-sol")
@@ -133,6 +156,42 @@ class RouterTest(unittest.TestCase):
         self.assertFalse(self.calls)
         astra = self.router.decide(payload("Review architecture", "gpt-6-astra"))
         self.assertEqual(astra["model"], "gpt-6-astra")
+
+    def test_alias_controls_mode_and_global_off_is_kill_switch(self):
+        config_path = self.root / "config.json"
+        config_path.write_text(json.dumps({"mode": "shadow", "auto_policy": "baseline"}))
+        auto = self.router.decide(payload("Change the button label text"),
+                                  native_selection=True, session_id="alias-auto")
+        self.assertEqual((auto["mode"], auto["model"]), ("auto", "gpt-6-luna"))
+        shadow = self.router.decide(payload("Change the button label text", "jev-shadow"),
+                                    native_selection=True, session_id="alias-shadow")
+        self.assertEqual((shadow["mode"], shadow["model"]), ("shadow", "gpt-6-sol"))
+        config_path.write_text(json.dumps({"mode": "off", "auto_policy": "baseline"}))
+        off = self.router.decide(payload("Change the button label text"),
+                                 native_selection=True, session_id="alias-off", mode_override="auto")
+        self.assertEqual((off["mode"], off["reason"]), ("off", "off"))
+
+    def test_dominated_terra_is_skipped_unless_explicitly_enabled(self):
+        models = catalog()
+        terra = next(item for item in models["models"] if item["slug"] == "gpt-6-terra")
+        terra["slug"] = "gpt-5.6-terra"
+        (self.root / "catalog.json").write_text(json.dumps(models))
+        def routine(body, timeout, key_file):
+            self.calls.append(body)
+            return {"answers": {"work_shape": {"choice": "routine"}, "effort": {"choice": "low"}}}
+        router = self.new_router(routine)
+        config_path = self.root / "config.json"
+        config_path.write_text(json.dumps({"mode": "auto", "auto_policy": "completion_v4"}))
+        self.assertEqual(set(economical_roles(visible_roles(models))), {"luna", "sol", "astra"})
+        chosen = router.decide(payload("Update a bounded parser with clear requirements"),
+                               native_selection=True, session_id="dominated")
+        self.assertEqual((chosen["model"], chosen["effort"]), ("gpt-6-sol", "low"))
+        self.assertNotIn("terra", self.calls[-1]["state"]["available_roles"])
+        config_path.write_text(json.dumps({"mode": "auto", "auto_policy": "completion_v4",
+                                           "allow_dominated_roles": True}))
+        allowed = router.decide(payload("Update another bounded parser with clear requirements"),
+                                native_selection=True, session_id="allowed")
+        self.assertEqual((allowed["model"], allowed["effort"]), ("gpt-5.6-terra", "low"))
 
     def test_auto_and_shadow_never_propose_astra(self):
         def pick_astra(body, timeout, key_file):

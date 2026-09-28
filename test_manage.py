@@ -619,6 +619,11 @@ class InstallTests(unittest.TestCase):
             cache["models"][0]["description"] = "server copy changed"
             manage.write_json(self.cache, cache)
             self.assertTrue(manage.doctor(self.root)["checks"]["account_catalog_matches_installed"])
+            cache["models"][0]["supports_reasoning_effort_updates"] = True
+            manage.write_json(self.cache, cache)
+            drift = manage.doctor(self.root)
+            self.assertFalse(drift["checks"]["account_catalog_matches_installed"])
+            self.assertIn("account model cache differs", drift["issues"][-1])
             native = manage.load_json(self.root / "native-models.json")
             native["models"][0]["model_messages"] = {"base_instructions": "changed"}
             manage.write_json(self.root / "native-models.json", native)

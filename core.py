@@ -18,6 +18,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from costs import CODEX_CREDITS
+
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 ROLES = ("luna", "terra", "sol", "astra")
@@ -104,16 +106,25 @@ def latest_user_text(payload: dict) -> str:
 
 def sanitize_task(raw: str) -> tuple[str, bool]:
     """Return a small excerpt and whether content was too uncertain to transmit."""
-    if not raw or len(raw) > 20_000 or _CODE_LIKE.search(raw) or re.search(r"\b(?:AGENTS|SKILL)\.md\b", raw, re.I):
+    if (not raw or len(raw) > 20_000 or "-----BEGIN" in raw
+            or re.search(r"\b(?:AGENTS|SKILL)\.md\b", raw, re.I)):
         return "", True
-    text = raw
-    for pattern in (_ENVELOPE, _FENCE, _URL, _EMAIL, _PATH, _SECRET_ASSIGN, _BEARER, _HIGH_ENTROPY):
+    text = _FENCE.sub(" [redacted] ", _ENVELOPE.sub(" [redacted] ", raw))
+    # Keep only the user's instruction before unfenced source. Later code lines
+    # can contain arbitrary repository text that regex redaction cannot secure.
+    code = _CODE_LIKE.search(text)
+    if code:
+        text = text[:code.start()] + " [redacted] "
+    for pattern in (_URL, _EMAIL, _PATH, _SECRET_ASSIGN, _BEARER, _HIGH_ENTROPY):
         text = pattern.sub(" [redacted] ", text)
     text = _XML_TAG.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
     redactions = text.count("[redacted]")
-    # A dense excerpt of secrets/code/environment is not a reliable task sample.
-    substantial = redactions >= 3 or len(text) < 12 or (redactions and len(text) < 50)
+    meaningful = text.replace("[redacted]", "").strip()
+    # Route a clear instruction even when it includes paths or a code appendix;
+    # stay on Sol when the redacted material carried most of the meaning.
+    substantial = (len(text) < 12 or (redactions and len(meaningful) < 25)
+                   or (redactions >= 3 and len(meaningful) < 50))
     if len(text) > MAX_TASK:
         text = text[:MAX_TASK].rsplit(" ", 1)[0]
     return text, substantial
@@ -140,6 +151,21 @@ def visible_roles(catalog: dict) -> dict[str, dict]:
                 if efforts and (role not in result or _version(slug) > _version(result[role]["slug"])):
                     result[role] = {"slug": slug, "efforts": efforts, "default": item.get("default_reasoning_level"), "info": item}
     return result
+
+
+def economical_roles(roles: dict[str, dict], allow_dominated: bool = False) -> dict[str, dict]:
+    """Exclude a weaker role when published credit rates cannot beat Sol."""
+    if allow_dominated or "sol" not in roles:
+        return roles
+    sol_rates = CODEX_CREDITS.get(roles["sol"]["slug"])
+    if sol_rates is None:
+        return roles
+    return {role: info for role, info in roles.items()
+            if role == "sol" or not (
+                (rates := CODEX_CREDITS.get(info["slug"])) is not None
+                and RANK[role] < RANK["sol"]
+                and all(sol <= other for sol, other in zip(sol_rates, rates))
+                and any(sol < other for sol, other in zip(sol_rates, rates)))}
 
 
 _HARNESS_FIELDS = (
@@ -432,9 +458,14 @@ class Router:
         if not (isinstance(configured_roles, list) and "sol" in configured_roles
                 and all(isinstance(role, str) and role in ROLES for role in configured_roles)):
             configured_roles = ["luna", "terra", "sol"]
-        roles = {role: all_roles[role] for role in configured_roles if role in all_roles}
+        roles = economical_roles({role: all_roles[role] for role in configured_roles if role in all_roles},
+                                 config.get("allow_dominated_roles") is True)
         native_model = payload.get("model") if isinstance(payload.get("model"), str) else ""
-        mode = mode_override if mode_override in ("auto", "shadow", "off") else "shadow" if native_model == "jev-shadow" else config.get("mode", "off")
+        configured_mode = config.get("mode", "off")
+        mode = ("off" if configured_mode == "off" else mode_override
+                if mode_override in ("auto", "shadow", "off") else
+                "auto" if native_model == "jev-auto" else
+                "shadow" if native_model == "jev-shadow" else configured_mode)
         if mode not in ("auto", "shadow", "off"):
             mode = "off"
         policy_key = "shadow_policy" if mode == "shadow" else "auto_policy"
