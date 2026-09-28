@@ -92,10 +92,18 @@ def cost_report(rows: list[dict], hours: int = 168, since: float | None = None) 
     clients = defaultdict(list)
     for row in usage:
         route = routes.get(row.get("route_id"))
-        if (route and all(route.get(key) == row.get(key) for key in ("session", "client", "model", "effort"))):
+        native_cli_launch = (route and route.get("client") == "cli" and row.get("mode") == "native"
+                             and isinstance(route.get("turn_hash"), str) and bool(route["turn_hash"])
+                             and route["turn_hash"] == row.get("turn_hash"))
+        if (route and (row.get("mode") == "auto" or native_cli_launch)
+                and all(route.get(key) == row.get(key) for key in ("session", "client", "model", "effort"))):
             linked.append(row)
             clients[str(row.get("client"))].append(row)
     linked_ids = {id(row) for row in linked}
+    # A pre-routed `codex exec` sends its concrete model to native Codex, so the
+    # gateway marks that exact request native. The route ID and turn hash prove
+    # it belongs to Auto; unrelated concrete-model calls remain excluded.
+    auto_usage = [row for row in usage if row.get("mode") == "auto" or id(row) in linked_ids]
     late_cli = [row for row in usage if row.get("mode") == "auto" and row.get("client") == "cli"
                 and id(row) not in linked_ids]
     late_turns = {(row.get("session"), row.get("turn_hash")) for row in late_cli
@@ -107,6 +115,8 @@ def cost_report(rows: list[dict], hours: int = 168, since: float | None = None) 
         "window_hours": hours, "since": cutoff,
         "auto": {"route_decisions": len(routes), "linked_calls": len(linked),
                  "unlinked_decisions": len(routes) - len({row.get("route_id") for row in linked}),
+                 "observed_all_auto": _view(auto_usage),
+                 "unlinked_auto_calls": len(auto_usage) - len(linked),
                  "all_clients": _view(linked), "by_client": {key: _view(value) for key, value in sorted(clients.items())},
                  "unlinked_cli_gateway": {
                      "distinct_session_turns": len(late_turns),
@@ -135,6 +145,8 @@ def format_savings(report: dict) -> str:
     """Human-readable evidence and same-token counterfactual, without a savings claim."""
     auto = report["auto"]
     view = auto["all_clients"]
+    all_auto = auto["observed_all_auto"]
+    all_auto_credits = all_auto["codex_credit_equivalent"]
     credits = view["codex_credit_equivalent"]
     api = view["api_usd_equivalent"]
     jev = report["jev"]
@@ -142,17 +154,22 @@ def format_savings(report: dict) -> str:
     priced = view["priced_calls"]
     sol = credits["all_sol_same_tokens"]
     pct = 100 * credits["vs_sol"] / sol if sol else None
+    all_sol = all_auto_credits["all_sol_same_tokens"]
+    all_pct = 100 * all_auto_credits["vs_sol"] / all_sol if all_sol else None
     period = (dt.datetime.fromtimestamp(report["since"], dt.timezone.utc).isoformat()
               if report.get("since") is not None else f"last {report['window_hours']} hours")
     lines = [
         f"Period: {period}",
-        f"Auto routes: {auto['route_decisions']} | linked calls: {auto['linked_calls']} | priced: {priced} | missing usage/rate: {view['unpriced_calls']}",
-        f"Unlinked CLI gateway: {late['distinct_session_turns']} turns, {late['observed']['calls']} calls (excluded from comparison)",
-        (f"Codex credit-equivalent: routed {credits['observed_mix']:.4f} vs all-Sol {sol:.4f} vs all-Astra {credits['all_astra_same_tokens']:.4f}"
-         if priced else "Codex credit-equivalent: unavailable (no priced linked calls)"),
-        f"Same-token difference vs Sol: {credits['vs_sol']:+.4f} ({pct:+.1f}%)" if pct is not None else
-            "Same-token difference vs Sol: unavailable (no priced linked calls)",
-        (f"API price-equivalent: routed ${api['observed_mix']:.4f} vs all-Sol ${api['all_sol_same_tokens']:.4f} vs all-Astra ${api['all_astra_same_tokens']:.4f} (not billed API spend)"
+        f"Observed Auto: {all_auto['calls']} model calls | linked to pre-turn route: {auto['linked_calls']} | unlinked: {auto['unlinked_auto_calls']}",
+        (f"All observed Auto, same-token credit-equivalent: routed {all_auto_credits['observed_mix']:.4f} vs all-Sol {all_sol:.4f}; difference {all_auto_credits['vs_sol']:+.4f} ({all_pct:+.2f}%)"
+         if all_pct is not None else "All observed Auto, same-token credit-equivalent: unavailable (no priced calls)"),
+        f"Pre-turn routes: {auto['route_decisions']} | linked calls: {auto['linked_calls']} | priced: {priced} | missing usage/rate: {view['unpriced_calls']}",
+        f"Unlinked CLI gateway: {late['distinct_session_turns']} turns, {late['observed']['calls']} calls (included above; excluded from linked subset)",
+        (f"Linked pre-turn subset, credit-equivalent: routed {credits['observed_mix']:.4f} vs all-Sol {sol:.4f} vs all-Astra {credits['all_astra_same_tokens']:.4f}"
+         if priced else "Linked pre-turn subset, credit-equivalent: unavailable (no priced linked calls)"),
+        f"Linked subset difference vs Sol: {credits['vs_sol']:+.4f} ({pct:+.1f}%)" if pct is not None else
+            "Linked subset difference vs Sol: unavailable (no priced linked calls)",
+        (f"Linked subset API price-equivalent: routed ${api['observed_mix']:.4f} vs all-Sol ${api['all_sol_same_tokens']:.4f} vs all-Astra ${api['all_astra_same_tokens']:.4f} (not billed API spend)"
          if api["priced_calls"] else "API price-equivalent: unavailable (no priced linked calls)"),
         f"Jev (Auto + Shadow): {jev['metered_requests']} metered decisions, {jev['input_tokens']} input / {jev['output_tokens']} output tokens; actual bill unknown",
         f"Jev paper-rate input-only estimate: ${jev['paper_input_only_usd']:.8f} (research rate, not account billing)",

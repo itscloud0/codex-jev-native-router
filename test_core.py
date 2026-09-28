@@ -323,6 +323,7 @@ class RouterTest(unittest.TestCase):
         self.assertEqual([item["model"] for item in results], ["gpt-6-sol", "gpt-6-sol", "gpt-6-luna"])
         self.assertEqual([item["reason"] for item in results], ["cache_hysteresis", "cache_hysteresis", "jev"])
         self.assertTrue(all("work_shape" in body["questions"] for body in seen))
+        self.assertIn("fully specified short answer", seen[0]["questions"]["work_shape"]["criteria"]["mechanical"].lower())
         self.assertEqual(results[0]["proposed_model"], "gpt-6-luna")
         self.assertNotIn("Rename", (self.root / "leases.json").read_text())
 

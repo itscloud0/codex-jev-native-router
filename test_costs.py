@@ -12,11 +12,12 @@ class CostReportTests(unittest.TestCase):
                  "model": "gpt-6-luna", "effort": "low",
                  "jev_input_tokens": 300, "jev_output_tokens": 20}
         usage = {"event": "usage", "ts": ts, "route_id": route["route_id"],
-                 "session": route["session"], "client": "cli", "model": "gpt-6-luna",
+                 "mode": "auto", "session": route["session"], "client": "cli", "model": "gpt-6-luna",
                  "effort": "low", "input_tokens": 1_000_000,
                  "cached_input_tokens": 500_000, "output_tokens": 100_000}
         unrelated = {**usage, "route_id": "c" * 24, "model": "gpt-6-sol"}
-        result = cost_report([route, usage, unrelated])
+        concrete = {**usage, "mode": "native", "model": "gpt-6-luna"}
+        result = cost_report([route, usage, unrelated, concrete])
         self.assertEqual(result["auto"]["linked_calls"], 1)
         credits = result["auto"]["all_clients"]["codex_credit_equivalent"]
         self.assertEqual(credits["observed_mix"], 2.625)
@@ -25,7 +26,8 @@ class CostReportTests(unittest.TestCase):
         self.assertEqual(result["jev"]["input_tokens"], 300)
         self.assertEqual(result["jev"]["paper_input_only_usd"], 0.0000126)
         self.assertIsNone(result["jev"]["cost_usd"])
-        self.assertEqual(result["observed_all_modes"]["calls"], 2)
+        self.assertEqual(result["observed_all_modes"]["calls"], 3)
+        self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 2)
 
     def test_unlinked_interactive_cli_turns_are_visible_separately(self):
         ts = int(time.time())
@@ -42,6 +44,41 @@ class CostReportTests(unittest.TestCase):
         self.assertEqual(late["distinct_session_turns"], 2)
         self.assertEqual(late["by_model_calls"], {"gpt-6-sol": 3})
         self.assertEqual(late["blocked_proposals"], {"gpt-6-luna": 1})
+
+    def test_preturn_cli_exec_concrete_usage_is_auto_only_for_same_turn(self):
+        ts = int(time.time())
+        route = {"event": "route", "ts": ts, "route_id": "a" * 24,
+                 "mode": "auto", "session": "b" * 24, "client": "cli",
+                 "model": "gpt-6-luna", "effort": "low", "turn_hash": "c" * 24}
+        usage = {"event": "usage", "ts": ts, "route_id": route["route_id"],
+                 "mode": "native", "reason": "concrete_model", "session": route["session"],
+                 "client": "cli", "model": route["model"], "effort": "low",
+                 "turn_hash": route["turn_hash"], "input_tokens": 100,
+                 "cached_input_tokens": 0, "output_tokens": 10}
+        side_call = {**usage, "turn_hash": "d" * 24}
+        result = cost_report([route, usage, side_call])
+        self.assertEqual(result["auto"]["linked_calls"], 1)
+        self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 1)
+        self.assertEqual(result["auto"]["unlinked_auto_calls"], 0)
+
+    def test_summary_leads_with_all_observed_auto_not_optimistic_linked_subset(self):
+        ts = int(time.time())
+        route = {"event": "route", "ts": ts, "route_id": "a" * 24,
+                 "mode": "auto", "session": "b" * 24, "client": "cli",
+                 "model": "gpt-6-luna", "effort": "low"}
+        luna = {"event": "usage", "ts": ts, "route_id": route["route_id"],
+                "mode": "auto", "session": route["session"], "client": "cli",
+                "model": "gpt-6-luna", "effort": "low", "input_tokens": 1_000_000,
+                "cached_input_tokens": 0, "output_tokens": 0}
+        sol = {**luna, "route_id": None, "model": "gpt-6-sol"}
+        result = cost_report([route, luna, *[sol for _ in range(99)]])
+        self.assertEqual(result["auto"]["linked_calls"], 1)
+        self.assertEqual(result["auto"]["unlinked_auto_calls"], 99)
+        self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 100)
+        summary = format_savings(result)
+        self.assertIn("Observed Auto: 100 model calls | linked to pre-turn route: 1 | unlinked: 99", summary)
+        self.assertIn("All observed Auto, same-token credit-equivalent: routed 4952.5000 vs all-Sol 5000.0000; difference +47.5000 (+0.95%)", summary)
+        self.assertIn("Linked subset difference vs Sol: +47.5000 (+95.0%)", summary)
 
     def test_missing_tokens_and_old_jev_usage_are_explicit(self):
         ts = int(time.time())
