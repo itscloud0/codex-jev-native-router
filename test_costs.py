@@ -26,6 +26,22 @@ class CostReportTests(unittest.TestCase):
         self.assertIsNone(result["jev"]["cost_usd"])
         self.assertEqual(result["observed_all_modes"]["calls"], 2)
 
+    def test_unlinked_interactive_cli_turns_are_visible_separately(self):
+        ts = int(time.time())
+        base = {"event": "usage", "ts": ts, "mode": "auto", "client": "cli",
+                "session": "a" * 24, "model": "gpt-6-sol", "effort": "medium",
+                "input_tokens": 100, "cached_input_tokens": 50, "output_tokens": 10}
+        rows = [{**base, "turn_hash": "b" * 24, "reason": "jev"},
+                {**base, "turn_hash": "b" * 24, "reason": "lease"},
+                {**base, "turn_hash": "c" * 24, "reason": "requires_native_model_selection",
+                 "proposed_model": "gpt-6-luna"}]
+        result = cost_report(rows)
+        self.assertEqual(result["auto"]["linked_calls"], 0)
+        late = result["auto"]["unlinked_cli_gateway"]
+        self.assertEqual(late["distinct_session_turns"], 2)
+        self.assertEqual(late["by_model_calls"], {"gpt-6-sol": 3})
+        self.assertEqual(late["blocked_proposals"], {"gpt-6-luna": 1})
+
     def test_missing_tokens_and_old_jev_usage_are_explicit(self):
         ts = int(time.time())
         rows = [{"event": "route", "ts": ts, "mode": "shadow"},

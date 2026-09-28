@@ -4,7 +4,7 @@ These rates are not a statement of ChatGPT subscription debits or Jev billing.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 import datetime as dt
 import re
 
@@ -86,13 +86,28 @@ def cost_report(rows: list[dict], hours: int = 168) -> dict:
         if (route and all(route.get(key) == row.get(key) for key in ("session", "client", "model", "effort"))):
             linked.append(row)
             clients[str(row.get("client"))].append(row)
+    linked_ids = {id(row) for row in linked}
+    late_cli = [row for row in usage if row.get("mode") == "auto" and row.get("client") == "cli"
+                and id(row) not in linked_ids]
+    late_turns = {(row.get("session"), row.get("turn_hash")) for row in late_cli
+                  if isinstance(row.get("session"), str) and row.get("session")
+                  and isinstance(row.get("turn_hash"), str) and row.get("turn_hash")}
     jev_routes = [row for row in rows if row.get("event") == "route" and row.get("mode") in ("auto", "shadow")]
     metered = [row for row in jev_routes if isinstance(row.get("jev_input_tokens"), int) and isinstance(row.get("jev_output_tokens"), int)]
     return {
         "window_hours": hours,
         "auto": {"route_decisions": len(routes), "linked_calls": len(linked),
                  "unlinked_decisions": len(routes) - len({row.get("route_id") for row in linked}),
-                 "all_clients": _view(linked), "by_client": {key: _view(value) for key, value in sorted(clients.items())}},
+                 "all_clients": _view(linked), "by_client": {key: _view(value) for key, value in sorted(clients.items())},
+                 "unlinked_cli_gateway": {
+                     "distinct_session_turns": len(late_turns),
+                     "calls_without_turn_hash": sum(not row.get("session") or not row.get("turn_hash") for row in late_cli),
+                     "by_model_calls": dict(Counter(str(row.get("model") or "unknown") for row in late_cli)),
+                     "by_reason_calls": dict(Counter(str(row.get("reason") or "unknown") for row in late_cli)),
+                     "blocked_proposals": dict(Counter(str(row.get("proposed_model") or "unknown") for row in late_cli
+                                                       if row.get("reason") == "requires_native_model_selection")),
+                     "observed": _view(late_cli),
+                     "note": "Native CLI TUI/resume reaches the gateway after model setup. Calls are not independent user turns; distinct session/turn hashes are a lower-bound grouping. This path cannot safely change the executor model."}},
         "observed_all_modes": _view(usage),
         "jev": {"route_decisions": len(jev_routes), "metered_requests": len(metered),
                 "input_tokens": sum(row["jev_input_tokens"] for row in metered),
