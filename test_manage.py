@@ -495,6 +495,16 @@ class InstallTests(unittest.TestCase):
         # A mismatched npm root never authorizes a global package install.
         self.assertEqual(calls[-1], [str(self.real), "update"])
 
+    def test_codex_update_entrypoint_uses_router_update_flow(self):
+        self.install()
+        with mock.patch.object(manage, "ROOT", self.root), \
+                mock.patch.object(manage.sys, "argv", [str(self.codex), "update"]), \
+                mock.patch.object(manage, "cli_update_and_refresh", return_value=7) as update:
+            with self.assertRaises(SystemExit) as exit_status:
+                manage.main()
+        self.assertEqual(exit_status.exception.code, 7)
+        update.assert_called_once_with()
+
     def mock_desktop_launchctl(self, initial):
         current = {"value": initial}
         calls = []
