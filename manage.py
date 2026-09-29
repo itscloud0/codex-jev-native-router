@@ -1202,11 +1202,16 @@ def report(root: Path = ROOT, weights: dict | None = None) -> dict:
     }
 
 
-def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None) -> dict:
+def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None,
+             since: float | None = None) -> dict:
     """Audit the active policy's route funnel without treating weak signals as savings."""
     if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= 24 * 30:
         raise ValueError("hours must be between 1 and 720")
     cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - hours * 3600
+    if since is not None:
+        if not isinstance(since, (int, float)) or isinstance(since, bool) or since < 0:
+            raise ValueError("since must be a Unix timestamp")
+        cutoff = max(cutoff, since)
     rows = [row for row in telemetry_rows(root, cutoff)
             if isinstance(row.get("ts"), (int, float)) and not isinstance(row["ts"], bool)]
     routes = [row for row in rows if row.get("event") == "route" and row.get("policy") == "completion_v4"
@@ -1287,7 +1292,8 @@ def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None
                 bucket = human_outcomes.setdefault(model, {"accepted": 0, "rework": 0, "failed": 0})
                 bucket[label["outcome"]] += 1
     return {
-        "policy": "completion_v4", "window_hours": hours, "files": len(telemetry_files(root)), "routes": len(routes),
+        "policy": "completion_v4", "window_hours": hours, "since": cutoff,
+        "files": len(telemetry_files(root)), "routes": len(routes),
         "auto_model_calls": {"calls": len(auto_calls), "by_model": auto_models, "by_client": auto_clients,
                              "gateway_blocks": sum(row.get("reason") == "requires_native_model_selection"
                                                    for row in auto_calls)},
@@ -1715,11 +1721,21 @@ def main() -> None:
                 raise SystemExit(run(argv[1:], ROOT))
             elif cmd == "evaluate":
                 options = argv[1:]
-                if len(options) % 2 or any(options[i] not in ("--hours", "--labels") for i in range(0, len(options), 2)) or len(set(options[::2])) != len(options) // 2:
-                    raise ValueError("usage: jev-codex evaluate [--hours 1..720] [--labels path.jsonl]")
+                if len(options) % 2 or any(options[i] not in ("--hours", "--labels", "--since") for i in range(0, len(options), 2)) or len(set(options[::2])) != len(options) // 2:
+                    raise ValueError("usage: jev-codex evaluate [--hours 1..720] [--since ISO-8601-UTC] [--labels path.jsonl]")
                 settings = dict(zip(options[::2], options[1::2]))
-                print(json.dumps(evaluate(hours=int(settings.get("--hours", 24)),
-                                          labels_path=Path(settings["--labels"]) if "--labels" in settings else None), indent=2))
+                since = None
+                if "--since" in settings:
+                    try:
+                        since_date = dt.datetime.fromisoformat(settings["--since"].replace("Z", "+00:00"))
+                    except ValueError as exc:
+                        raise ValueError("--since must be an ISO-8601 timestamp with timezone") from exc
+                    if since_date.tzinfo is None:
+                        raise ValueError("--since must include a timezone")
+                    since = since_date.timestamp()
+                print(json.dumps(evaluate(hours=int(settings.get("--hours", 720 if since is not None else 24)),
+                                          labels_path=Path(settings["--labels"]) if "--labels" in settings else None,
+                                          since=since), indent=2))
             elif cmd == "trace":
                 if len(argv) != 2:
                     raise ValueError("usage: jev-codex trace THREAD_UUID")

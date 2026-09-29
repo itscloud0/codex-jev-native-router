@@ -299,6 +299,24 @@ class AdapterTests(unittest.TestCase):
         other.server(response(5, {'thread': {'id': 'forked'}, 'model': 'gpt-6-sol'}))
         self.assertEqual(other.store.get('forked')['alias'], 'jev-auto')
 
+    def test_cli_launch_alias_routes_resumed_concrete_model_and_manual_switch_wins(self):
+        cli = rpc_adapter.Adapter(self.root, router=self.router, client='cli', initial_alias='jev-auto')
+        sent = json.loads(cli.client(request('thread/resume', {'threadId': 'old', 'model': 'gpt-6-sol'}, 80)))
+        self.assertNotIn('model', sent['params'])
+        cli.server(response(80, {'thread': {'id': 'old'}, 'model': 'gpt-6-sol', 'reasoningEffort': 'medium'}))
+        cli.store.update('old', context=1000)
+        turn = json.loads(cli.client(request('turn/start', {'threadId': 'old', 'model': 'gpt-6-sol',
+            'input': [{'type': 'text', 'text': 'Fix a typo'}]}, 81)))
+        self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-luna', 'low'))
+        self.assertEqual(len(self.router.calls), 1)
+        cli.server((json.dumps({'jsonrpc': '2.0', 'method': 'turn/completed',
+                                 'params': {'threadId': 'old', 'turn': {'id': 'turn-1', 'status': 'completed'}}})+'\n').encode())
+        cli.client(request('thread/settings/update', {'threadId': 'old', 'model': 'gpt-6-sol'}, 82))
+        manual = json.loads(cli.client(request('turn/start', {'threadId': 'old', 'model': 'gpt-6-sol',
+            'input': [{'type': 'text', 'text': 'Keep Sol'}]}, 83)))
+        self.assertEqual(manual['params']['model'], 'gpt-6-sol')
+        self.assertEqual(len(self.router.calls), 1)
+
     def test_steer_failure_kill_switch_custom_provider(self):
         self.adapter.store.update('t', alias='jev-shadow')
         raw = request('turn/start', {'threadId': 't', 'model': 'jev-shadow', 'input': [{'type': 'text', 'text': 'hello'}]})

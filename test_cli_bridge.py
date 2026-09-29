@@ -19,6 +19,14 @@ def client_frame(data: bytes, opcode: int = 1, fin: bool = True) -> bytes:
 
 
 class WebSocketTests(unittest.TestCase):
+    def test_selected_alias_accepts_native_cli_model_syntaxes(self):
+        for args, expected in ((['-m', 'jev-auto'], 'jev-auto'),
+                               (['--model=jev-shadow'], 'jev-shadow'),
+                               (['-c', 'model="jev-auto"'], 'jev-auto'),
+                               (['--config=model="jev-shadow"'], 'jev-shadow'),
+                               (['-m', 'gpt-6-sol'], None)):
+            self.assertEqual(cli_bridge.selected_alias(args), expected)
+
     def test_bridge_failure_strips_alias_override(self):
         self.assertEqual(cli_bridge.fallback_args(["-m", "jev-auto", "resume", "--last"], "gpt-6-sol"),
                          ["-m", "gpt-6-sol", "resume", "--last"])
@@ -101,7 +109,9 @@ class WebSocketTests(unittest.TestCase):
 
     def test_native_exit_before_connection_has_diagnostic_without_restart(self):
         output = io.StringIO()
+        aliases = []
         def mark_ready(*args, **kwargs):
+            aliases.append(kwargs["args"][-1])
             return Mock(start=lambda: kwargs["args"][5].set())
 
         with (patch.object(cli_bridge.threading, "Thread", side_effect=mark_ready),
@@ -109,8 +119,9 @@ class WebSocketTests(unittest.TestCase):
               patch.object(cli_bridge.subprocess, "call") as direct,
               redirect_stderr(output)):
             popen.return_value.wait.return_value = 1
-            self.assertEqual(cli_bridge.run(Path("/tmp"), Path("/native"), ["resume"]), 1)
+            self.assertEqual(cli_bridge.run(Path("/tmp"), Path("/native"), ["-m", "jev-auto", "resume"]), 1)
         direct.assert_not_called()
+        self.assertEqual(aliases, ["jev-auto"])
         self.assertIn("last stage: starting accept thread", output.getvalue())
 
     def test_exit_after_connection_does_not_restart_native_tui(self):

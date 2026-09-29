@@ -641,6 +641,9 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result["outcomes_by_executed_model"]["gpt-6-sol"]["nonzero_command_exits"], 1)
         self.assertIsNone(result["quality_equivalent_savings"])
         self.assertNotIn("private source", json.dumps(result))
+        self.assertEqual(manage.evaluate(self.root, hours=24, since=now + 1)["routes"], 0)
+        with self.assertRaises(ValueError):
+            manage.evaluate(self.root, since=-1)
         labels = self.root / "labels.jsonl"
         labels.write_text(json.dumps({"route_id": "a" * 24, "outcome": "rework", "comment": "private source"}) + "\n")
         reviewed = manage.evaluate(self.root, labels_path=labels)

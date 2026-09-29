@@ -166,13 +166,14 @@ def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20,
         return connection, stream
 
 
-def _serve_connection(connection: socket.socket, stream, root: Path, native: Path) -> None:
+def _serve_connection(connection: socket.socket, stream, root: Path, native: Path,
+                      initial_alias: str | None = None) -> None:
     _debug("connected")
     with connection, stream:
         child = subprocess.Popen([str(native), "-c", "model_catalog_json=" + json.dumps(str(root / "models.json")),
                                   "app-server", "--listen", "stdio://"],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
-        adapter = Adapter(root, client="cli")
+        adapter = Adapter(root, client="cli", initial_alias=initial_alias)
         assert child.stdin is not None and child.stdout is not None
         stop = threading.Event()
 
@@ -239,7 +240,8 @@ def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
               connected: threading.Event | None = None,
               ready: threading.Event | None = None,
               progress: dict | None = None,
-              stopped: threading.Event | None = None) -> None:
+              stopped: threading.Event | None = None,
+              initial_alias: str | None = None) -> None:
     """Serve the main TUI and its independent session-picker connections."""
     stopped = stopped or threading.Event()
     slots = threading.BoundedSemaphore(4)
@@ -268,7 +270,10 @@ def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
 
         def worker(sock=connection, reader=stream) -> None:
             try:
-                _serve_connection(sock, reader, root, native)
+                if initial_alias is None:
+                    _serve_connection(sock, reader, root, native)
+                else:
+                    _serve_connection(sock, reader, root, native, initial_alias)
             finally:
                 slots.release()
 
@@ -299,6 +304,23 @@ def fallback_args(args: list[str], model: str) -> list[str]:
     return ["-m", model, *clean]
 
 
+def selected_alias(args: list[str]) -> str | None:
+    for index, arg in enumerate(args):
+        value = None
+        if arg in ("-m", "--model") and index + 1 < len(args):
+            value = args[index + 1]
+        elif arg.startswith("--model="):
+            value = arg.partition("=")[2]
+        elif arg in ("-c", "--config") and index + 1 < len(args):
+            key, sep, candidate = args[index + 1].partition("=")
+            value = candidate if sep and key == "model" else None
+        elif arg.startswith("--config=model="):
+            value = arg.partition("model=")[2]
+        if isinstance(value, str) and value.strip().strip("\"'") in ("jev-auto", "jev-shadow"):
+            return value.strip().strip("\"'")
+    return None
+
+
 def run(root: Path, native: Path, args: list[str]) -> int:
     """Run the real TUI against a private per-process bridge; never replace it."""
     try:
@@ -312,8 +334,9 @@ def run(root: Path, native: Path, args: list[str]) -> int:
             ready = threading.Event()
             stopped = threading.Event()
             progress: dict = {"stage": "starting accept thread"}
+            initial_alias = selected_alias(args)
             bridge = threading.Thread(target=serve_one,
-                                      args=(listener, root, native, token, connected, ready, progress, stopped), daemon=True)
+                                      args=(listener, root, native, token, connected, ready, progress, stopped, initial_alias), daemon=True)
             bridge.start()
             if not ready.wait(timeout=5):
                 raise TimeoutError("Jev bridge accept thread did not start")

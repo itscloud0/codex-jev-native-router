@@ -151,12 +151,14 @@ class IntentStore:
 
 class Adapter:
     def __init__(self, root: Path, router: Router | None = None, store: IntentStore | None = None,
-                 client: str = "desktop"):
+                 client: str = "desktop", initial_alias: str | None = None):
         self.root = root
         self.router = router or Router(root / "config.json", root / "native-models.json",
                                        root / "state/leases.json", root / "state/telemetry.jsonl")
         self.store = store or IntentStore(root / "state/desktop-intent.json")
         self.client_name = client if client in ("desktop", "cli") else "desktop"
+        self.initial_alias = initial_alias if self.client_name == "cli" and initial_alias in ALIASES else None
+        self.resume_pending: set[str] = set()
         self.pending: dict[str, dict] = {}
         self.active: set[str] = set()
         self.actual: dict[str, tuple[str, str]] = {}
@@ -288,6 +290,21 @@ class Adapter:
         # Collaboration settings win in native Codex. Any concrete selection is manual.
         explicit = config_model or (collab_model if isinstance(collab_model, str) else top_model if isinstance(top_model, str) else None)
         pending_manual = bool(self.pending_override.pop(thread_id, False)) if method == "turn/start" and thread_id else False
+        if method == "thread/resume" and self.initial_alias:
+            # CLI launch intent wins over the concrete model saved in the old
+            # thread. Native Codex still restores its history and actual model.
+            explicit = self.initial_alias
+            if thread_id:
+                self.resume_pending.add(thread_id)
+        elif (method == "turn/start" and thread_id and self.initial_alias and saved
+              and saved.get("alias") in ALIASES and isinstance(explicit, str)
+              and not _alias(explicit) and not pending_manual
+              and (thread_id in self.resume_pending or explicit == saved.get("actual"))):
+            # The TUI can echo a resumed thread's concrete model on its next
+            # turn. A preceding settings update still marks a manual choice.
+            explicit = saved["alias"]
+        if method == "turn/start" and thread_id:
+            self.resume_pending.discard(thread_id)
         manual_override = bool(method == "turn/start" and (pending_manual or
             (saved and saved.get("alias") in ALIASES and isinstance(explicit, str) and not _alias(explicit))))
         prior_failed = bool(saved and saved.get("failed"))
@@ -493,6 +510,8 @@ class Adapter:
             self.store.update(new_thread, alias=alias, actual=actual,
                               effort=result.get("reasoningEffort"), conservative=conservative,
                               clear_effort_override=True)
+            if self.initial_alias and pending["method"] == "thread/resume":
+                self.resume_pending.add(new_thread)
         if alias and pending["method"] in ("thread/start", "thread/resume", "thread/fork") and isinstance(result.get("model"), str):
             changed = copy.deepcopy(message)
             changed["result"]["model"] = alias
