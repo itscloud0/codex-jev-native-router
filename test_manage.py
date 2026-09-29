@@ -343,6 +343,33 @@ class InstallTests(unittest.TestCase):
         manage.rollback(self.root, stop=False)
         self.assertEqual(os.readlink(self.codex), str(self.real))
 
+    def test_cli_target_updates_independently_and_falls_back(self):
+        self.install()
+        newer = self.base / "updated-codex"
+        newer.write_text("binary")
+        newer.chmod(0o700)
+        changed = manage.cli_set_target(newer, self.root)
+        self.assertTrue(changed["changed"])
+        self.assertTrue((Path(changed["backup"]) / "manifest.json").is_file())
+        self.assertFalse(manage.cli_set_target(newer, self.root)["changed"])
+        self.assertEqual(len(list((self.root / "backups").glob("cli-target-*"))), 1)
+        self.assertEqual(manage.cli_args(["update"], self.root), [str(newer), "update"])
+        self.assertEqual(manage.native_args(["--version"], self.root)[0], str(newer))
+        manifest = manage.load_json(self.root / "manifest.json")
+        self.assertEqual(manifest["native_target"], str(self.real))
+        self.assertEqual(manage.status(self.root)["cli_binary"], str(newer))
+        self.assertTrue(manage.doctor(self.root)["checks"]["cli_binary_executable"])
+        newer.unlink()
+        self.assertEqual(manage.cli_args(["update"], self.root), [str(self.real), "update"])
+        self.assertFalse(manage.doctor(self.root)["checks"]["cli_binary_executable"])
+        self.assertIn("falls back", " ".join(manage.doctor(self.root)["issues"]))
+
+    def test_cli_target_rejects_router_wrapper(self):
+        self.install()
+        with self.assertRaisesRegex(ValueError, "Jev wrapper"):
+            manage.cli_set_target(self.root / "jev-codex", self.root)
+        self.assertEqual(manage.load_json(self.root / "manifest.json")["cli_target"], str(self.real))
+
     def mock_desktop_launchctl(self, initial):
         current = {"value": initial}
         calls = []
@@ -731,6 +758,9 @@ class InstallTests(unittest.TestCase):
             self.assertEqual((self.root / "models.json").read_bytes(), before)
             cache = manage.load_json(self.cache)
             cache["models"][0]["description"] = "server copy changed"
+            manage.write_json(self.cache, cache)
+            self.assertTrue(manage.doctor(self.root)["checks"]["account_catalog_matches_installed"])
+            cache["models"][0]["priority"] = 99
             manage.write_json(self.cache, cache)
             self.assertTrue(manage.doctor(self.root)["checks"]["account_catalog_matches_installed"])
             cache["models"][0]["supports_reasoning_effort_updates"] = True

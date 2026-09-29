@@ -296,6 +296,8 @@ def desktop_refresh_native(native: Path, root: Path = ROOT) -> dict:
     atomic_write(backup / "app-server-wrapper", old_content, 0o700)
     if wrapper.read_bytes() != old_content or manifest_path.read_bytes() != manifest_bytes:
         raise ValueError("Desktop files changed during refresh; refusing to overwrite")
+    if manifest.get("cli_target", manifest["native_target"]) == manifest["native_target"]:
+        manifest["cli_target"] = str(native)
     manifest["native_target"] = str(native)
     atomic_write(wrapper, new_content, 0o700)
     try:
@@ -358,6 +360,34 @@ def stop_agent() -> None:
 
 def source_dir() -> Path:
     return Path(__file__).resolve().parent
+
+
+def cli_target(manifest: dict) -> str:
+    """Use an independently updated CLI, with the Desktop bundle as fallback."""
+    configured = manifest.get("cli_target", manifest["native_target"])
+    path = Path(configured)
+    if path.is_file() and os.access(path, os.X_OK):
+        return str(path)
+    return manifest["native_target"]
+
+
+def cli_set_target(native: Path, root: Path = ROOT) -> dict:
+    """Switch only terminal execution; never change the signed Desktop binary."""
+    if not native.is_absolute() or not native.is_file() or not os.access(native, os.X_OK):
+        raise ValueError("CLI binary missing or not executable: " + str(native))
+    if native.resolve() in ((root / "jev-codex").resolve(), (root / "codex-native").resolve()):
+        raise ValueError("CLI target cannot point to a Jev wrapper")
+    manifest_path = root / "manifest.json"
+    manifest = load_json(manifest_path)
+    if manifest.get("cli_target", manifest["native_target"]) == str(native):
+        return {"changed": False, "cli_target": str(native)}
+    backup = root / "backups" / ("cli-target-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                                   + "-" + secrets.token_hex(4))
+    backup.mkdir(mode=0o700, parents=True)
+    atomic_write(backup / "manifest.json", manifest_path.read_bytes())
+    manifest["cli_target"] = str(native)
+    write_json(manifest_path, manifest)
+    return {"changed": True, "cli_target": str(native), "backup": str(backup)}
 
 
 def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path = BIN,
@@ -448,6 +478,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     manifest = {
         "original_codex_link": original_link,
         "native_target": str(native_target),
+        "cli_target": str(native_target),
         "original_root": before,
         "managed_root": managed,
         "config_state": "enabled",
@@ -941,6 +972,8 @@ def status(root: Path = ROOT) -> dict:
     wrapper = desktop.get("wrapper_path", str(root / "app-server-wrapper"))
     native_binary = Path(manifest["native_target"])
     native_executable = native_binary.is_file() and os.access(native_binary, os.X_OK)
+    configured_cli = Path(manifest.get("cli_target", manifest["native_target"]))
+    cli_executable = configured_cli.is_file() and os.access(configured_cli, os.X_OK)
     wrapper_issue = desktop_wrapper_issue(root, manifest)
     try:
         current_env = desktop_env()
@@ -978,6 +1011,9 @@ def status(root: Path = ROOT) -> dict:
         "native_binary": manifest["native_target"],
         "native_binary_executable": native_executable,
         "native_binary_issue": None if native_executable else f"native_target missing or not executable: {native_binary}",
+        "cli_binary": str(configured_cli),
+        "cli_binary_executable": cli_executable,
+        "cli_fallback_active": not cli_executable,
         "daemon": process,
         "desktop": desktop_status,
         "preserved_user_changes": manifest.get("preserved_user_changes", []),
@@ -997,8 +1033,10 @@ def doctor(root: Path = ROOT) -> dict:
     expected_aliases = {item["slug"]: item for item in expected["models"]
                         if item.get("slug") in ("jev-auto", "jev-shadow")}
     native_binary = Path(manifest.get("native_target", ""))
+    cli_binary = Path(manifest.get("cli_target", manifest.get("native_target", "")))
     checks = {
         "native_binary_executable": native_binary.is_file() and os.access(native_binary, os.X_OK),
+        "cli_binary_executable": cli_binary.is_file() and os.access(cli_binary, os.X_OK),
         "desktop_wrapper_matches_native_target": desktop_wrapper_issue(root, manifest) is None,
         "managed_aliases_match_native_sol": aliases == expected_aliases,
         "gateway_healthy": current["health"],
@@ -1010,10 +1048,10 @@ def doctor(root: Path = ROOT) -> dict:
     if cache.is_file():
         try:
             refreshed = native_catalog(cache)
-            # Server-side description copy changes often; only execution and
+            # Description and picker order change often; only execution and
             # capability metadata requires reinstalling a managed catalog.
             def execution_view(catalog: dict) -> list[dict]:
-                return [{key: value for key, value in item.items() if key != "description"}
+                return [{key: value for key, value in item.items() if key not in ("description", "priority")}
                         for item in catalog["models"]]
             checks["account_catalog_matches_installed"] = execution_view(refreshed) == execution_view(native)
         except (OSError, ValueError, TypeError):
@@ -1024,6 +1062,8 @@ def doctor(root: Path = ROOT) -> dict:
     wrapper_issue = desktop_wrapper_issue(root, manifest)
     if wrapper_issue:
         issues.append(wrapper_issue)
+    if not checks["cli_binary_executable"] and cli_binary != native_binary:
+        issues.append(f"cli_target missing or not executable: {cli_binary}; CLI falls back to native_target")
     if not checks["desktop_adapter_active"]:
         issues.append("Desktop runtime does not match Jev enable/disable state; fully quit and reopen ChatGPT.app")
     if checks.get("account_catalog_matches_installed") is False:
@@ -1508,7 +1548,7 @@ def _strip_cli_alias_model(argv: list[str]) -> tuple[list[str], str | None]:
 
 def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list[str]:
     manifest = load_json(root / "manifest.json")
-    native = manifest["native_target"]
+    native = cli_target(manifest)
     bypass = str(Path(manifest["bin_dir"]) / "codex-native")
     mode_flag = next((x for x in argv if x in ("--jev-auto", "--jev-shadow", "--jev-off")), None)
     clean, selected_alias = _strip_cli_alias_model(
@@ -1590,7 +1630,7 @@ def native_overrides(root: Path) -> list[str]:
 
 def native_args(argv: list[str], root: Path = ROOT) -> list[str]:
     manifest = load_json(root / "manifest.json")
-    real = manifest["native_target"]
+    real = cli_target(manifest)
     config = load_json(root / "config.json")
     command, _, _ = _parse_cli(argv)
     explicit_model = False
@@ -1659,7 +1699,7 @@ def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
+    commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "cli-set-native",
                 "desktop-enable", "desktop-disable", "desktop-safe"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1683,6 +1723,10 @@ def main() -> None:
                 if len(argv) != 3 or argv[1] != "--native":
                     raise ValueError("usage: jev-codex desktop-refresh-native --native /absolute/path/to/codex")
                 print(json.dumps(desktop_refresh_native(Path(argv[2])), indent=2))
+            elif cmd == "cli-set-native":
+                if len(argv) != 3 or argv[1] != "--native":
+                    raise ValueError("usage: jev-codex cli-set-native --native /absolute/path/to/codex")
+                print(json.dumps(cli_set_target(Path(argv[2])), indent=2))
             elif cmd == "rollback": rollback()
             elif cmd == "update": update_catalog()
             elif cmd == "status": print(json.dumps(status(), indent=2))
@@ -1756,7 +1800,7 @@ def main() -> None:
         if bridge_args is not None:
             from cli_bridge import run
             manifest = load_json(ROOT / "manifest.json")
-            raise SystemExit(run(ROOT, Path(manifest["native_target"]), bridge_args))
+            raise SystemExit(run(ROOT, Path(cli_target(manifest)), bridge_args))
     args = cli_args(argv, stdin_tty=sys.stdin.isatty())
     os.execv(args[0], args)
 
