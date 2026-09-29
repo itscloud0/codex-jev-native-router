@@ -1624,8 +1624,14 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
 
 
 def native_overrides(root: Path) -> list[str]:
-    return ["-c", "openai_base_url=" + toml_string(NATIVE_URL),
-            "-c", "model_catalog_json=" + toml_string(str(root / "native-models.json"))]
+    manifest = load_json(root / "manifest.json")
+    config = tomllib.loads(Path(manifest["config_path"]).read_text())
+    # A redundant base URL override makes Codex warn that the model picker is
+    # unsupported. Only force the native endpoint when bypassing a legacy
+    # router URL still present in the user's config.
+    endpoint = (["-c", "openai_base_url=" + toml_string(NATIVE_URL)]
+                if "127.0.0.1:43191" in str(config.get("openai_base_url", "")) else [])
+    return [*endpoint, "-c", "model_catalog_json=" + toml_string(str(root / "native-models.json"))]
 
 
 def native_args(argv: list[str], root: Path = ROOT) -> list[str]:

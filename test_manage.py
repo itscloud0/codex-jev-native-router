@@ -87,6 +87,19 @@ class InstallTests(unittest.TestCase):
         self.assertIn("Jev chooses", aliases["jev-auto"]["description"])
         self.assertEqual(aliases["jev-shadow"]["supported_reasoning_levels"], [{"effort": "medium"}])
 
+    def test_newer_sol_catalog_refresh_uses_newer_alias_metadata(self):
+        older = {"slug": "gpt-6-sol", "visibility": "list",
+                 "supported_reasoning_levels": [{"effort": "medium"}], "model_messages": {"identity": "old"}}
+        newer = {"slug": "gpt-6.1-sol", "visibility": "list",
+                 "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}],
+                 "model_messages": {"identity": "new"}}
+        catalog = {"models": [older, newer]}
+        self.assertEqual(manage.select_sol(catalog), "gpt-6.1-sol")
+        aliases = {item["slug"]: item for item in manage.managed_catalog(catalog)["models"]
+                   if item["slug"].startswith("jev-")}
+        self.assertEqual(aliases["jev-auto"]["model_messages"], newer["model_messages"])
+        self.assertEqual(aliases["jev-auto"]["supported_reasoning_levels"], [{"effort": "medium"}])
+
     def test_enable_migrates_legacy_relay_url_and_preserves_manual_alias(self):
         self.install()
         manage.disable(self.root, stop=False)
@@ -282,10 +295,13 @@ class InstallTests(unittest.TestCase):
                              [str(self.real), "-c", 'openai_base_url="https://custom.example"', "exec", "Fix"])
         native = manage.native_args(["exec", "Fix"], self.root)
         self.assertEqual(native[0], str(self.real))
-        self.assertIn('openai_base_url="https://chatgpt.com/backend-api/codex"', native)
+        self.assertFalse(any("openai_base_url=" in arg for arg in native))
         self.assertEqual(native[-4:], ["-m", "gpt-6-sol", "exec", "Fix"])
         native = manage.native_args(["-c", "model_reasoning_effort=high", "exec", "Fix"], self.root)
-        self.assertEqual(native[5:7], ["-m", "gpt-6-sol"])
+        self.assertEqual(native[3:5], ["-m", "gpt-6-sol"])
+        self.config.write_text('openai_base_url = "http://127.0.0.1:43191/legacy"\n' + self.config.read_text())
+        self.assertIn('openai_base_url="https://chatgpt.com/backend-api/codex"',
+                      manage.native_args(["exec", "Fix"], self.root))
 
     def test_interactive_cli_keeps_local_auto_alias_and_resume(self):
         self.install()

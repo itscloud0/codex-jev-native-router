@@ -28,6 +28,13 @@ def payload(text, model="jev-auto", context_tokens=0):
 
 
 class RouterTest(unittest.TestCase):
+    def test_newer_sol_is_selected_only_when_account_catalog_lists_it(self):
+        models = catalog()
+        self.assertEqual(visible_roles(models)["sol"]["slug"], "gpt-6-sol")
+        models["models"].append({"slug": "gpt-6.1-sol", "visibility": "list", "supported_in_api": True,
+                                 "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}]})
+        self.assertEqual(visible_roles(models)["sol"]["slug"], "gpt-6.1-sol")
+
     def test_russian_risk_floors(self):
         self.assertEqual(_floor("Исправь уязвимость авторизации"), "astra")
         self.assertEqual(_floor("Сделай миграцию схемы данных"), "astra")
