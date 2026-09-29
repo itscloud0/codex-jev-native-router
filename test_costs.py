@@ -22,9 +22,11 @@ class CostReportTests(unittest.TestCase):
         credits = result["auto"]["all_clients"]["codex_credit_equivalent"]
         self.assertEqual(credits["observed_mix"], 2.625)
         self.assertEqual(credits["all_sol_same_tokens"], 52.5)
+        self.assertEqual(credits["all_sol_6_1_same_tokens"], 51.25)
         self.assertEqual(credits["vs_sol"], 49.875)
         self.assertEqual(result["jev"]["input_tokens"], 300)
-        self.assertEqual(result["jev"]["paper_input_only_usd"], 0.0000126)
+        self.assertEqual(result["jev"]["published_rate_estimate_usd"], 0.0000126)
+        self.assertIn("typesafe.ai", result["jev"]["published_rate_source"])
         self.assertIsNone(result["jev"]["cost_usd"])
         self.assertEqual(result["observed_all_modes"]["calls"], 3)
         self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 2)
@@ -76,9 +78,29 @@ class CostReportTests(unittest.TestCase):
         self.assertEqual(result["auto"]["unlinked_auto_calls"], 99)
         self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 100)
         summary = format_savings(result)
-        self.assertIn("Observed Auto: 100 model calls | linked to pre-turn route: 1 | unlinked: 99", summary)
-        self.assertIn("All observed Auto, same-token credit-equivalent: routed 4952.5000 vs all-Sol 5000.0000; difference +47.5000 (+0.95%)", summary)
+        self.assertIn("Auto-attributed: 100 model calls | linked to pre-turn route: 1 | unlinked (routing unproven): 99", summary)
+        self.assertIn("Auto-attributed same-token credit-equivalent: observed mix 4952.5000 vs all-GPT-6-Sol 5000.0000; difference +47.5000 (+0.95%)", summary)
+        self.assertIn("all-6.1-Sol 5000.0000", summary)
         self.assertIn("Linked subset difference vs Sol: +47.5000 (+95.0%)", summary)
+
+    def test_six_point_one_sol_is_priced_in_credits_but_not_in_unpublished_api_rates(self):
+        now = int(time.time())
+        usage = {"event": "usage", "ts": now, "mode": "auto", "client": "cli",
+                 "model": "gpt-6.1-sol", "input_tokens": 1_000_000,
+                 "cached_input_tokens": 800_000, "output_tokens": 100_000}
+        view = cost_report([usage])["auto"]["observed_all_auto"]
+        self.assertEqual(view["priced_calls"], 1)
+        self.assertEqual(view["codex_credit_equivalent"]["observed_mix"], 37)
+        self.assertEqual(view["api_usd_equivalent"]["unpriced_calls"], 1)
+
+    def test_missing_cache_detail_is_unpriced_not_assumed_zero(self):
+        now = int(time.time())
+        row = {"event": "usage", "ts": now, "mode": "auto", "model": "gpt-6-sol",
+               "input_tokens": 1_000, "cached_input_tokens": 0, "output_tokens": 100,
+               "cached_input_observed": False}
+        view = cost_report([row])["auto"]["observed_all_auto"]
+        self.assertEqual((view["priced_calls"], view["unpriced_calls"]), (0, 1))
+        self.assertEqual(view["cache_metadata"]["missing_calls"], 1)
 
     def test_missing_tokens_and_old_jev_usage_are_explicit(self):
         ts = int(time.time())

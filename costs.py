@@ -11,10 +11,11 @@ import re
 
 CODEX_CREDITS_URL = "https://learn.chatgpt.com/docs/pricing"
 API_PRICES_URL = "https://developers.openai.com/api/docs/pricing"
-# Standard, short-context published rates per million tokens, 2026-09-28.
+# Standard, short-context published rates per million tokens, 2026-09-30.
 # Tuple order: uncached input, cached input, output.
 CODEX_CREDITS = {
     "gpt-6-luna": (2.5, 0.25, 12.5),
+    "gpt-6.1-sol": (50, 2.5, 250),
     "gpt-6-sol": (50, 5, 250),
     "gpt-6-astra": (250, 25, 1250),
     "gpt-5.6-luna": (5, 0.5, 30),
@@ -29,11 +30,13 @@ API_USD = {
     "gpt-5.6-terra": (2, 0.20, 12),
     "gpt-5.6-sol": (4, 0.40, 20),
 }
-JEV_PAPER_INPUT_USD_PER_M = 0.042
-JEV_PAPER_URL = "https://arxiv.org/pdf/2609.29429v1"
+JEV_PUBLISHED_INPUT_USD_PER_M = 0.042
+JEV_RATE_URL = "https://typesafe.ai/blog/introducing-system-one-models-and-jev"
 
 
 def _tokens(row: dict) -> tuple[int, int, int] | None:
+    if row.get("cached_input_observed") is False:
+        return None
     values = [row.get(key) for key in ("input_tokens", "cached_input_tokens", "output_tokens")]
     if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
         return None
@@ -52,18 +55,26 @@ def _view(rows: list[dict]) -> dict:
     totals = tuple(sum(_tokens(row)[i] for row in known) for i in range(3))
     actual_credits = sum(_charge(_tokens(row), CODEX_CREDITS[row["model"]]) for row in known)
     sol_credits = _charge(totals, CODEX_CREDITS["gpt-6-sol"])
+    sol_6_1_credits = _charge(totals, CODEX_CREDITS["gpt-6.1-sol"])
     astra_credits = _charge(totals, CODEX_CREDITS["gpt-6-astra"])
     api_known = [row for row in known if row["model"] in API_USD]
     api_tokens = tuple(sum(_tokens(row)[i] for row in api_known) for i in range(3))
     api_actual = sum(_charge(_tokens(row), API_USD[row["model"]]) for row in api_known)
     return {
         "calls": len(rows), "priced_calls": len(known), "unpriced_calls": len(rows) - len(known),
+        "cache_metadata": {
+            "observed_calls": sum(row.get("cached_input_observed") is True for row in rows),
+            "missing_calls": sum(row.get("cached_input_observed") is False for row in rows),
+            "legacy_unknown_calls": sum("cached_input_observed" not in row for row in rows),
+        },
         "tokens": {"uncached_input": totals[0], "cached_input": totals[1], "output": totals[2]},
         "codex_credit_equivalent": {
             "observed_mix": round(actual_credits, 4),
             "all_sol_same_tokens": round(sol_credits, 4),
+            "all_sol_6_1_same_tokens": round(sol_6_1_credits, 4),
             "all_astra_same_tokens": round(astra_credits, 4),
             "vs_sol": round(sol_credits - actual_credits, 4),
+            "vs_sol_6_1": round(sol_6_1_credits - actual_credits, 4),
             "vs_astra": round(astra_credits - actual_credits, 4),
         },
         "api_usd_equivalent": {
@@ -131,12 +142,12 @@ def cost_report(rows: list[dict], hours: int = 168, since: float | None = None) 
         "jev": {"route_decisions": len(jev_routes), "metered_requests": len(metered),
                 "input_tokens": sum(row["jev_input_tokens"] for row in metered),
                 "output_tokens": sum(row["jev_output_tokens"] for row in metered),
-                "paper_input_only_usd": round(sum(row["jev_input_tokens"] for row in metered)
-                                               * JEV_PAPER_INPUT_USD_PER_M / 1_000_000, 8),
-                "paper_rate_source": JEV_PAPER_URL,
-                "cost_usd": None, "cost_reason": "No public TypeSafe Jev tariff or billing export verified; old decisions did not record Jev tokens."},
+                "published_rate_estimate_usd": round(sum(row["jev_input_tokens"] for row in metered)
+                                                     * JEV_PUBLISHED_INPUT_USD_PER_M / 1_000_000, 8),
+                "published_rate_source": JEV_RATE_URL,
+                "cost_usd": None, "cost_reason": "No TypeSafe account billing export verified; some old decisions did not record Jev tokens."},
         "sources": {"codex_credits": CODEX_CREDITS_URL, "api_usd": API_PRICES_URL,
-                    "rate_card_checked": "2026-09-28", "tier": "standard_short_context"},
+                    "rate_card_checked": "2026-09-30", "tier": "standard_short_context"},
         "limits": "Same-token counterfactual, not quality-equivalent savings. Desktop may record only the last model call of a turn. Pro included usage is not a dollar charge; API rates are comparison units only. Fast/long-context rates are not applied.",
     }
 
@@ -156,15 +167,22 @@ def format_savings(report: dict) -> str:
     pct = 100 * credits["vs_sol"] / sol if sol else None
     all_sol = all_auto_credits["all_sol_same_tokens"]
     all_pct = 100 * all_auto_credits["vs_sol"] / all_sol if all_sol else None
+    all_sol_6_1 = all_auto_credits["all_sol_6_1_same_tokens"]
+    all_pct_6_1 = 100 * all_auto_credits["vs_sol_6_1"] / all_sol_6_1 if all_sol_6_1 else None
     period = (dt.datetime.fromtimestamp(report["since"], dt.timezone.utc).isoformat()
               if report.get("since") is not None else f"last {report['window_hours']} hours")
     lines = [
         f"Period: {period}",
-        f"Observed Auto: {all_auto['calls']} model calls | linked to pre-turn route: {auto['linked_calls']} | unlinked: {auto['unlinked_auto_calls']}",
-        (f"All observed Auto, same-token credit-equivalent: routed {all_auto_credits['observed_mix']:.4f} vs all-Sol {all_sol:.4f}; difference {all_auto_credits['vs_sol']:+.4f} ({all_pct:+.2f}%)"
-         if all_pct is not None else "All observed Auto, same-token credit-equivalent: unavailable (no priced calls)"),
+        f"Auto-attributed: {all_auto['calls']} model calls | linked to pre-turn route: {auto['linked_calls']} | unlinked (routing unproven): {auto['unlinked_auto_calls']}",
+        (f"Auto-attributed same-token credit-equivalent: observed mix {all_auto_credits['observed_mix']:.4f} vs all-GPT-6-Sol {all_sol:.4f}; difference {all_auto_credits['vs_sol']:+.4f} ({all_pct:+.2f}%)"
+         if all_pct is not None else "Auto-attributed same-token credit-equivalent: unavailable (no priced calls)"),
+        (f"Current GPT-6.1-Sol rate sensitivity, same tokens: all-6.1-Sol {all_sol_6_1:.4f}; difference {all_auto_credits['vs_sol_6_1']:+.4f} ({all_pct_6_1:+.2f}%). Not a historically available or quality-matched baseline."
+         if all_pct_6_1 is not None else "Current GPT-6.1-Sol rate sensitivity: unavailable (no priced calls)"),
         f"Pre-turn routes: {auto['route_decisions']} | linked calls: {auto['linked_calls']} | priced: {priced} | missing usage/rate: {view['unpriced_calls']}",
         f"Unlinked CLI gateway: {late['distinct_session_turns']} turns, {late['observed']['calls']} calls (included above; excluded from linked subset)",
+        (f"Cache detail provenance: {all_auto['cache_metadata']['observed_calls']} observed, "
+         f"{all_auto['cache_metadata']['missing_calls']} missing, "
+         f"{all_auto['cache_metadata']['legacy_unknown_calls']} legacy calls with unverified cache-detail provenance"),
         (f"Linked pre-turn subset, credit-equivalent: routed {credits['observed_mix']:.4f} vs all-Sol {sol:.4f} vs all-Astra {credits['all_astra_same_tokens']:.4f}"
          if priced else "Linked pre-turn subset, credit-equivalent: unavailable (no priced linked calls)"),
         f"Linked subset difference vs Sol: {credits['vs_sol']:+.4f} ({pct:+.1f}%)" if pct is not None else
@@ -172,7 +190,7 @@ def format_savings(report: dict) -> str:
         (f"Linked subset API price-equivalent: routed ${api['observed_mix']:.4f} vs all-Sol ${api['all_sol_same_tokens']:.4f} vs all-Astra ${api['all_astra_same_tokens']:.4f} (not billed API spend)"
          if api["priced_calls"] else "API price-equivalent: unavailable (no priced linked calls)"),
         f"Jev (Auto + Shadow): {jev['metered_requests']} metered decisions, {jev['input_tokens']} input / {jev['output_tokens']} output tokens; actual bill unknown",
-        f"Jev paper-rate input-only estimate: ${jev['paper_input_only_usd']:.8f} (research rate, not account billing)",
+        f"Jev published token-rate estimate: ${jev['published_rate_estimate_usd']:.8f} (not account billing)",
         "Limit: same observed tokens, not a paired quality-equivalent comparison or measured Pro allowance savings.",
     ]
     return "\n".join(lines)

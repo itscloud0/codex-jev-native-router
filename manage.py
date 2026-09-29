@@ -383,10 +383,8 @@ def cli_catalog_path(root: Path, name: str) -> Path:
     return root / name
 
 
-def cli_account_catalog(root: Path = ROOT) -> dict:
-    """Ask the native Codex CLI for the authenticated catalog in an isolated home."""
-    manifest = load_json(root / "manifest.json")
-    auth = Path(manifest["config_path"]).parent / "auth.json"
+def fetch_account_catalog(native: Path, auth: Path) -> dict:
+    """Ask native Codex for its account catalog in an isolated temporary home."""
     if not auth.is_file() or auth.stat().st_size > 1024 * 1024:
         raise ValueError("Codex auth file missing or too large; login with native Codex first")
     with tempfile.TemporaryDirectory(prefix="jev-catalog-") as directory:
@@ -397,7 +395,7 @@ def cli_account_catalog(root: Path = ROOT) -> dict:
         env.pop("OPENAI_BASE_URL", None)
         env.pop("CODEX_CLI_PATH", None)
         try:
-            result = subprocess.run([cli_target(manifest), "debug", "models"], env=env,
+            result = subprocess.run([str(native), "debug", "models"], env=env,
                                     capture_output=True, timeout=30, check=False)
         except subprocess.TimeoutExpired as exc:
             raise ValueError("native Codex model catalog fetch timed out") from exc
@@ -407,6 +405,12 @@ def cli_account_catalog(root: Path = ROOT) -> dict:
             return native_catalog_from_response(json.loads(result.stdout))
         except (ValueError, TypeError) as exc:
             raise ValueError("native Codex returned an invalid model catalog; CLI catalog unchanged") from exc
+
+
+def cli_account_catalog(root: Path = ROOT) -> dict:
+    manifest = load_json(root / "manifest.json")
+    auth = Path(manifest["config_path"]).parent / "auth.json"
+    return fetch_account_catalog(Path(cli_target(manifest)), auth)
 
 
 def cli_refresh_catalog(catalog_path: Path | None = None, root: Path = ROOT) -> dict:
@@ -437,6 +441,30 @@ def cli_refresh_catalog(catalog_path: Path | None = None, root: Path = ROOT) -> 
         raise ValueError("router manifest changed during CLI catalog refresh; refusing to overwrite")
     write_json(manifest_path, manifest)
     return {"changed": True, "sol": select_sol(native), "backup": str(backup)}
+
+
+def cli_update_and_refresh(root: Path = ROOT) -> int:
+    """Run the native CLI updater, then refresh only the CLI account catalog."""
+    native = cli_target(load_json(root / "manifest.json"))
+    command = [native, "update"]
+    resolved = Path(native).resolve()
+    if tuple(part.name for part in list(resolved.parents)[:4]) == ("bin", "codex", "@openai", "node_modules"):
+        npm = shutil.which("npm")
+        if npm:
+            npm_root = subprocess.run([npm, "root", "-g"], capture_output=True, text=True, check=False)
+            if npm_root.returncode == 0 and Path(npm_root.stdout.strip()).resolve() == resolved.parents[3]:
+                command = [npm, "install", "-g", "@openai/codex@latest"]
+    result = subprocess.run(command, check=False)
+    if result.returncode:
+        return result.returncode
+    try:
+        refreshed = cli_refresh_catalog(root=root)
+        print("Jev CLI catalog: " + ("updated" if refreshed["changed"] else "already current")
+              + " (Sol " + refreshed["sol"] + ")")
+    except (OSError, ValueError, RuntimeError):
+        print("Jev CLI catalog refresh failed; native Codex remains usable. "
+              "Retry with jev-codex cli-refresh-models.", file=sys.stderr)
+    return 0
 
 
 def cli_set_target(native: Path, root: Path = ROOT) -> dict:
@@ -1892,6 +1920,8 @@ def main() -> None:
     if not (ROOT / "manifest.json").exists():
         print("jev-codex is not installed", file=sys.stderr)
         raise SystemExit(1)
+    if invoked == "codex" and argv == ["update"]:
+        raise SystemExit(cli_update_and_refresh())
     if invoked == "codex" and sys.stdin.isatty():
         bridge_args = cli_bridge_args(argv)
         if bridge_args is not None:

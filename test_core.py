@@ -200,6 +200,16 @@ class RouterTest(unittest.TestCase):
                                 native_selection=True, session_id="allowed")
         self.assertEqual((allowed["model"], allowed["effort"]), ("gpt-5.6-terra", "low"))
 
+    def test_new_sol_credit_rate_excludes_dominated_terra(self):
+        models = catalog()
+        terra = next(item for item in models["models"] if item["slug"] == "gpt-6-terra")
+        terra["slug"] = "gpt-5.6-terra"
+        sol = next(item for item in models["models"] if item["slug"] == "gpt-6-sol")
+        sol["slug"] = "gpt-6.1-sol"
+        roles = visible_roles(models)
+        self.assertEqual(set(economical_roles(roles)), {"luna", "sol", "astra"})
+        self.assertEqual(roles["sol"]["slug"], "gpt-6.1-sol")
+
     def test_auto_and_shadow_never_propose_astra(self):
         def pick_astra(body, timeout, key_file):
             self.assertNotIn("astra", body["questions"]["capability"]["criteria"])
@@ -816,6 +826,7 @@ class RouterTest(unittest.TestCase):
         r.record_usage(d, None, "ok")
         line = json.loads((self.root / "telemetry.jsonl").read_text())
         self.assertTrue(line["usage_missing"])
+        self.assertFalse(line["cached_input_observed"])
         self.assertIsNone(line["input_tokens"])
         self.assertIsNone(line["cached_input_tokens"])
         self.assertIsNone(line["context_tokens"])
@@ -834,6 +845,7 @@ class RouterTest(unittest.TestCase):
         self.assertNotIn("never-log-this", line)
         self.assertNotIn("private", line)
         self.assertEqual(json.loads(line)["cached_input_tokens"], 40)
+        self.assertTrue(json.loads(line)["cached_input_observed"])
         self.assertEqual(json.loads(line)["event"], "usage")
         self.assertEqual(json.loads(line)["command_failures"], 2)
         self.assertEqual(oct(os.stat(self.root / "telemetry.jsonl").st_mode & 0o777), "0o600")

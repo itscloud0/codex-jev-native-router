@@ -445,6 +445,56 @@ class InstallTests(unittest.TestCase):
                 manage.cli_refresh_catalog(root=self.root)
         self.assertNotIn("cli_catalog_generation", manage.load_json(self.root / "manifest.json"))
 
+    def test_cli_update_refreshes_catalog_only_after_native_update_succeeds(self):
+        self.install()
+        with mock.patch.object(manage.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as native, \
+                mock.patch.object(manage, "cli_refresh_catalog", return_value={"changed": True, "sol": "gpt-6.1-sol"}) as refresh:
+            self.assertEqual(manage.cli_update_and_refresh(self.root), 0)
+            native.assert_called_once_with([str(self.real), "update"], check=False)
+            refresh.assert_called_once_with(root=self.root)
+        with mock.patch.object(manage.subprocess, "run", return_value=subprocess.CompletedProcess([], 7)), \
+                mock.patch.object(manage, "cli_refresh_catalog") as refresh:
+            self.assertEqual(manage.cli_update_and_refresh(self.root), 7)
+            refresh.assert_not_called()
+        with mock.patch.object(manage.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
+                mock.patch.object(manage, "cli_refresh_catalog", side_effect=ValueError("secret details")):
+            self.assertEqual(manage.cli_update_and_refresh(self.root), 0)
+
+    def test_cli_update_uses_npm_only_for_verified_global_install(self):
+        self.install()
+        npm_root = self.base / "lib/node_modules"
+        package_bin = npm_root / "@openai/codex/bin/codex.js"
+        package_bin.parent.mkdir(parents=True)
+        package_bin.write_text("native")
+        package_bin.chmod(0o700)
+        self.real.unlink()
+        self.real.symlink_to(package_bin)
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv == ["/usr/local/bin/npm", "root", "-g"]:
+                return subprocess.CompletedProcess(argv, 0, str(npm_root) + "\n", "")
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(manage.shutil, "which", return_value="/usr/local/bin/npm"), \
+                mock.patch.object(manage.subprocess, "run", side_effect=run), \
+                mock.patch.object(manage, "cli_refresh_catalog", return_value={"changed": False, "sol": "gpt-6-sol"}):
+            self.assertEqual(manage.cli_update_and_refresh(self.root), 0)
+        self.assertEqual(calls[-1], ["/usr/local/bin/npm", "install", "-g", "@openai/codex@latest"])
+
+        calls.clear()
+        def mismatched_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, str(self.base / "other") + "\n", "")
+
+        with mock.patch.object(manage.shutil, "which", return_value="/usr/local/bin/npm"), \
+                mock.patch.object(manage.subprocess, "run", side_effect=mismatched_run), \
+                mock.patch.object(manage, "cli_refresh_catalog", return_value={"changed": False, "sol": "gpt-6-sol"}):
+            self.assertEqual(manage.cli_update_and_refresh(self.root), 0)
+        # A mismatched npm root never authorizes a global package install.
+        self.assertEqual(calls[-1], [str(self.real), "update"])
+
     def mock_desktop_launchctl(self, initial):
         current = {"value": initial}
         calls = []

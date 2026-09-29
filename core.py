@@ -729,7 +729,11 @@ class Router:
         usage = usage if isinstance(usage, dict) else {}
         usage_missing = not isinstance(usage.get("input_tokens"), int) or not isinstance(usage.get("output_tokens"), int)
         input_tokens = _bounded_int(usage.get("input_tokens")) if not usage_missing else None
-        cached = _bounded_int((usage.get("input_tokens_details") or {}).get("cached_tokens") if isinstance(usage.get("input_tokens_details"), dict) else 0) if not usage_missing else None
+        details = usage.get("input_tokens_details")
+        cache_observed = (not usage_missing and isinstance(details, dict)
+                          and isinstance(details.get("cached_tokens"), int)
+                          and not isinstance(details["cached_tokens"], bool))
+        cached = _bounded_int(details["cached_tokens"]) if cache_observed else 0
         record = {
             "event": "route" if event == "route" else "usage",
             "ts": int(time.time()), "session": self._safe_hash(decision.get("session")),
@@ -760,6 +764,7 @@ class Router:
             "switched": decision.get("switched") is True,
             "context_tokens": _bounded_int(decision.get("context_tokens")) if isinstance(decision.get("context_tokens"), int) else None,
             "usage_missing": usage_missing,
+            "cached_input_observed": cache_observed,
             "input_tokens": input_tokens,
             "cached_input_tokens": min(cached, input_tokens) if not usage_missing else None,
             "output_tokens": _bounded_int(usage.get("output_tokens")) if not usage_missing else None,
