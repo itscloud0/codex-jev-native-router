@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 import manage
+import rpc_adapter
 
 
 class ConfigSurgeryTests(unittest.TestCase):
@@ -387,6 +388,62 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Jev wrapper"):
             manage.cli_set_target(self.root / "jev-codex", self.root)
         self.assertEqual(manage.load_json(self.root / "manifest.json")["cli_target"], str(self.real))
+
+    def test_cli_catalog_refresh_adds_new_sol_without_changing_desktop(self):
+        self.install()
+        desktop_native = (self.root / "native-models.json").read_bytes()
+        desktop_managed = (self.root / "models.json").read_bytes()
+        catalog = manage.load_json(self.cache)
+        catalog["models"].append({"slug": "gpt-6.1-sol", "visibility": "list", "supported_in_api": True,
+                                  "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}],
+                                  "model_messages": {"identity": "new-sol"}})
+        source = self.base / "fresh-account-catalog.json"
+        manage.write_json(source, catalog)
+        changed = manage.cli_refresh_catalog(source, self.root)
+        self.assertEqual(changed["sol"], "gpt-6.1-sol")
+        self.assertTrue(changed["changed"])
+        self.assertTrue((Path(changed["backup"]) / "manifest.json").is_file())
+        self.assertEqual((self.root / "native-models.json").read_bytes(), desktop_native)
+        self.assertEqual((self.root / "models.json").read_bytes(), desktop_managed)
+        self.assertEqual(manage.select_sol(manage.load_json(manage.cli_catalog_path(self.root, "native-models.json"))),
+                         "gpt-6.1-sol")
+        self.assertIn("gpt-6.1-sol", [item["slug"] for item in
+                      manage.load_json(manage.cli_catalog_path(self.root, "models.json"))["models"]])
+        with mock.patch.object(manage, "health", return_value=True):
+            self.assertIn(str(manage.cli_catalog_path(self.root, "models.json")),
+                          manage.cli_args([], self.root)[4])
+            self.assertTrue(manage.doctor(self.root)["checks"]["cli_catalog_matches_latest_sol"])
+        adapter = rpc_adapter.Adapter(self.root, client="cli",
+                                      catalog_path=manage.cli_catalog_path(self.root, "native-models.json"))
+        self.assertEqual(adapter.router.catalog_path, manage.cli_catalog_path(self.root, "native-models.json"))
+        self.assertFalse(manage.cli_refresh_catalog(source, self.root)["changed"])
+
+    def test_cli_account_catalog_uses_isolated_auth_and_preserves_original(self):
+        self.install()
+        auth = self.base / "auth.json"
+        auth.write_text('{"test":"secret"}')
+        auth.chmod(0o600)
+        original = auth.read_bytes()
+        seen = {}
+
+        def debug_models(argv, **kwargs):
+            isolated = Path(kwargs["env"]["CODEX_HOME"])
+            seen["home"] = isolated
+            self.assertEqual(argv, [str(self.real), "debug", "models"])
+            self.assertEqual((isolated / "auth.json").read_bytes(), original)
+            self.assertEqual((isolated / "auth.json").stat().st_mode & 0o777, 0o600)
+            self.assertNotEqual(isolated, self.base)
+            return subprocess.CompletedProcess(argv, 0, self.cache.read_bytes(), b"")
+
+        with mock.patch.object(manage.subprocess, "run", side_effect=debug_models):
+            catalog = manage.cli_account_catalog(self.root)
+        self.assertEqual(manage.select_sol(catalog), "gpt-6-sol")
+        self.assertFalse(seen["home"].exists())
+        self.assertEqual(auth.read_bytes(), original)
+        with mock.patch.object(manage.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"secret")):
+            with self.assertRaisesRegex(ValueError, "catalog fetch failed"):
+                manage.cli_refresh_catalog(root=self.root)
+        self.assertNotIn("cli_catalog_generation", manage.load_json(self.root / "manifest.json"))
 
     def mock_desktop_launchctl(self, initial):
         current = {"value": initial}

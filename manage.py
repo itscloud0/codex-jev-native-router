@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.request
 
@@ -369,6 +370,73 @@ def cli_target(manifest: dict) -> str:
     if path.is_file() and os.access(path, os.X_OK):
         return str(path)
     return manifest["native_target"]
+
+
+def cli_catalog_path(root: Path, name: str) -> Path:
+    """Use a complete CLI catalog generation, keeping Desktop on its own files."""
+    manifest = load_json(root / "manifest.json")
+    generation = manifest.get("cli_catalog_generation")
+    if isinstance(generation, str) and re.fullmatch(r"cli-[0-9TZ]{16}-[a-f0-9]{8}", generation):
+        directory = root / "catalogs" / generation
+        if all((directory / item).is_file() for item in ("native-models.json", "models.json")):
+            return directory / name
+    return root / name
+
+
+def cli_account_catalog(root: Path = ROOT) -> dict:
+    """Ask the native Codex CLI for the authenticated catalog in an isolated home."""
+    manifest = load_json(root / "manifest.json")
+    auth = Path(manifest["config_path"]).parent / "auth.json"
+    if not auth.is_file() or auth.stat().st_size > 1024 * 1024:
+        raise ValueError("Codex auth file missing or too large; login with native Codex first")
+    with tempfile.TemporaryDirectory(prefix="jev-catalog-") as directory:
+        isolated = Path(directory)
+        atomic_write(isolated / "auth.json", auth.read_bytes())
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(isolated)
+        env.pop("OPENAI_BASE_URL", None)
+        env.pop("CODEX_CLI_PATH", None)
+        try:
+            result = subprocess.run([cli_target(manifest), "debug", "models"], env=env,
+                                    capture_output=True, timeout=30, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("native Codex model catalog fetch timed out") from exc
+        if result.returncode or len(result.stdout) > 8 * 1024 * 1024:
+            raise ValueError("native Codex model catalog fetch failed; CLI catalog unchanged")
+        try:
+            return native_catalog_from_response(json.loads(result.stdout))
+        except (ValueError, TypeError) as exc:
+            raise ValueError("native Codex returned an invalid model catalog; CLI catalog unchanged") from exc
+
+
+def cli_refresh_catalog(catalog_path: Path | None = None, root: Path = ROOT) -> dict:
+    """Install native account catalog for CLI without changing Desktop."""
+    if catalog_path is None:
+        native = cli_account_catalog(root)
+    else:
+        if not catalog_path.is_file() or catalog_path.stat().st_size > 8 * 1024 * 1024:
+            raise ValueError("CLI account catalog missing or too large")
+        native = native_catalog(catalog_path)
+    managed = managed_catalog(native)
+    if (native == load_json(cli_catalog_path(root, "native-models.json"))
+            and managed == load_json(cli_catalog_path(root, "models.json"))):
+        return {"changed": False, "sol": select_sol(native)}
+    generation = "cli-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(4)
+    directory = root / "catalogs" / generation
+    directory.mkdir(mode=0o700, parents=True)
+    write_json(directory / "native-models.json", native)
+    write_json(directory / "models.json", managed)
+    manifest_path = root / "manifest.json"
+    previous = manifest_path.read_bytes()
+    backup = root / "backups" / generation
+    backup.mkdir(mode=0o700, parents=True)
+    atomic_write(backup / "manifest.json", previous)
+    manifest = json.loads(previous)
+    manifest["cli_catalog_generation"] = generation
+    if manifest_path.read_bytes() != previous:
+        raise ValueError("router manifest changed during CLI catalog refresh; refusing to overwrite")
+    write_json(manifest_path, manifest)
+    return {"changed": True, "sol": select_sol(native), "backup": str(backup)}
 
 
 def cli_set_target(native: Path, root: Path = ROOT) -> dict:
@@ -974,6 +1042,7 @@ def status(root: Path = ROOT) -> dict:
     native_executable = native_binary.is_file() and os.access(native_binary, os.X_OK)
     configured_cli = Path(manifest.get("cli_target", manifest["native_target"]))
     cli_executable = configured_cli.is_file() and os.access(configured_cli, os.X_OK)
+    cli_native_path = cli_catalog_path(root, "native-models.json")
     wrapper_issue = desktop_wrapper_issue(root, manifest)
     try:
         current_env = desktop_env()
@@ -1014,6 +1083,8 @@ def status(root: Path = ROOT) -> dict:
         "cli_binary": str(configured_cli),
         "cli_binary_executable": cli_executable,
         "cli_fallback_active": not cli_executable,
+        "cli_catalog": str(cli_native_path),
+        "cli_sol": select_sol(load_json(cli_native_path)),
         "daemon": process,
         "desktop": desktop_status,
         "preserved_user_changes": manifest.get("preserved_user_changes", []),
@@ -1027,6 +1098,8 @@ def doctor(root: Path = ROOT) -> dict:
     manifest = load_json(root / "manifest.json")
     native = native_catalog(root / "native-models.json")
     managed = load_json(root / "models.json")
+    cli_native = native_catalog(cli_catalog_path(root, "native-models.json"))
+    cli_managed = load_json(cli_catalog_path(root, "models.json"))
     expected = managed_catalog(native)
     aliases = {item.get("slug"): item for item in managed.get("models", [])
                if isinstance(item, dict) and item.get("slug") in ("jev-auto", "jev-shadow")}
@@ -1037,6 +1110,16 @@ def doctor(root: Path = ROOT) -> dict:
     checks = {
         "native_binary_executable": native_binary.is_file() and os.access(native_binary, os.X_OK),
         "cli_binary_executable": cli_binary.is_file() and os.access(cli_binary, os.X_OK),
+        "cli_catalog_matches_latest_sol": {
+            item.get("slug"): item for item in cli_managed.get("models", []) if isinstance(item, dict)
+            and item.get("slug") in ("jev-auto", "jev-shadow")
+        } == {
+            item["slug"]: item for item in managed_catalog(cli_native)["models"]
+            if item.get("slug") in ("jev-auto", "jev-shadow")
+        },
+        "cli_catalog_generation_valid": (
+            not manifest.get("cli_catalog_generation")
+            or cli_catalog_path(root, "native-models.json") != root / "native-models.json"),
         "desktop_wrapper_matches_native_target": desktop_wrapper_issue(root, manifest) is None,
         "managed_aliases_match_native_sol": aliases == expected_aliases,
         "gateway_healthy": current["health"],
@@ -1064,6 +1147,10 @@ def doctor(root: Path = ROOT) -> dict:
         issues.append(wrapper_issue)
     if not checks["cli_binary_executable"] and cli_binary != native_binary:
         issues.append(f"cli_target missing or not executable: {cli_binary}; CLI falls back to native_target")
+    if not checks["cli_catalog_matches_latest_sol"]:
+        issues.append("CLI Jev alias metadata differs from its latest Sol model")
+    if not checks["cli_catalog_generation_valid"]:
+        issues.append("CLI catalog generation is incomplete; CLI falls back to Desktop catalog")
     if not checks["desktop_adapter_active"]:
         issues.append("Desktop runtime does not match Jev enable/disable state; fully quit and reopen ChatGPT.app")
     if checks.get("account_catalog_matches_installed") is False:
@@ -1507,7 +1594,7 @@ def _cli_endpoint_args(root: Path, config: dict, route_token: str | None = None)
 
 
 def _cli_alias_catalog_args(root: Path) -> list[str]:
-    return ["-c", "model_catalog_json=" + toml_string(str(root / "models.json"))]
+    return ["-c", "model_catalog_json=" + toml_string(str(cli_catalog_path(root, "models.json")))]
 
 
 def _cli_effort_override(argv: list[str]) -> str | None:
@@ -1587,7 +1674,7 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
     from core import Router, cli_route_id
     payload = {"model": "jev-auto", "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt[:12000]}]}]}
     try:
-        router = Router(config_path=root / "config.json", catalog_path=root / "native-models.json",
+        router = Router(config_path=root / "config.json", catalog_path=cli_catalog_path(root, "native-models.json"),
                         state_path=root / "state/leases.json", telemetry_path=root / "state/telemetry.jsonl")
         requested_mode = "shadow" if mode_flag == "--jev-shadow" else "auto"
         route_token = secrets.token_hex(8)
@@ -1631,7 +1718,7 @@ def native_overrides(root: Path) -> list[str]:
     # router URL still present in the user's config.
     endpoint = (["-c", "openai_base_url=" + toml_string(NATIVE_URL)]
                 if "127.0.0.1:43191" in str(config.get("openai_base_url", "")) else [])
-    return [*endpoint, "-c", "model_catalog_json=" + toml_string(str(root / "native-models.json"))]
+    return [*endpoint, "-c", "model_catalog_json=" + toml_string(str(cli_catalog_path(root, "native-models.json")))]
 
 
 def native_args(argv: list[str], root: Path = ROOT) -> list[str]:
@@ -1705,7 +1792,7 @@ def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "cli-set-native",
+    commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "cli-set-native", "cli-refresh-models",
                 "desktop-enable", "desktop-disable", "desktop-safe"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1733,6 +1820,10 @@ def main() -> None:
                 if len(argv) != 3 or argv[1] != "--native":
                     raise ValueError("usage: jev-codex cli-set-native --native /absolute/path/to/codex")
                 print(json.dumps(cli_set_target(Path(argv[2])), indent=2))
+            elif cmd == "cli-refresh-models":
+                if len(argv) != 1 and (len(argv) != 3 or argv[1] != "--catalog"):
+                    raise ValueError("usage: jev-codex cli-refresh-models [--catalog /absolute/path/to/native-account-models.json]")
+                print(json.dumps(cli_refresh_catalog(Path(argv[2]) if len(argv) == 3 else None), indent=2))
             elif cmd == "rollback": rollback()
             elif cmd == "update": update_catalog()
             elif cmd == "status": print(json.dumps(status(), indent=2))

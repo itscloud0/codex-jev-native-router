@@ -151,9 +151,10 @@ class IntentStore:
 
 class Adapter:
     def __init__(self, root: Path, router: Router | None = None, store: IntentStore | None = None,
-                 client: str = "desktop", initial_alias: str | None = None):
+                 client: str = "desktop", initial_alias: str | None = None,
+                 catalog_path: Path | None = None):
         self.root = root
-        self.router = router or Router(root / "config.json", root / "native-models.json",
+        self.router = router or Router(root / "config.json", catalog_path or root / "native-models.json",
                                        root / "state/leases.json", root / "state/telemetry.jsonl")
         self.store = store or IntentStore(root / "state/desktop-intent.json")
         self.client_name = client if client in ("desktop", "cli") else "desktop"

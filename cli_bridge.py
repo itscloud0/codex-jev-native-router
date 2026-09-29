@@ -24,6 +24,7 @@ import threading
 import time
 
 from rpc_adapter import Adapter
+from manage import cli_catalog_path
 
 
 MAX_MESSAGE = 64 * 1024 * 1024
@@ -170,10 +171,11 @@ def _serve_connection(connection: socket.socket, stream, root: Path, native: Pat
                       initial_alias: str | None = None) -> None:
     _debug("connected")
     with connection, stream:
-        child = subprocess.Popen([str(native), "-c", "model_catalog_json=" + json.dumps(str(root / "models.json")),
+        child = subprocess.Popen([str(native), "-c", "model_catalog_json=" + json.dumps(str(cli_catalog_path(root, "models.json"))),
                                   "app-server", "--listen", "stdio://"],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
-        adapter = Adapter(root, client="cli", initial_alias=initial_alias)
+        adapter = Adapter(root, client="cli", initial_alias=initial_alias,
+                          catalog_path=cli_catalog_path(root, "native-models.json"))
         assert child.stdin is not None and child.stdout is not None
         stop = threading.Event()
 
