@@ -192,14 +192,60 @@ def desktop_plist_content(wrapper: Path) -> bytes:
 
 
 def desktop_wrapper_content(root: Path, native: Path, python: Path) -> bytes:
-    argv = [str(python), str(root / "rpc_adapter.py"), "--native", str(native), "--root", str(root), "--"]
+    argv = [str(python), str(root / "desktop_bootstrap.py"), "--native", str(native), "--root", str(root), "--"]
     adapter = root / "rpc_adapter.py"
+    bootstrap = root / "desktop_bootstrap.py"
     direct = "openai_base_url=" + toml_string(NATIVE_URL)
+    return ("#!/bin/sh\n"
+            + f"if [ -x {shlex.quote(str(python))} ] && [ -r {shlex.quote(str(adapter))} ] && [ -r {shlex.quote(str(bootstrap))} ]; then\n"
+            + "  exec " + " ".join(map(shlex.quote, [*argv, "-c", direct])) + ' "$@"\n'
+            + "fi\n"
+            + "exec " + " ".join(map(shlex.quote, [str(native), "-c", direct])) + ' "$@"\n').encode()
+
+
+def legacy_desktop_wrapper_content(root: Path, native: Path, python: Path) -> bytes:
+    """Recognize only our previous Python-parented wrapper for safe upgrade."""
+    argv = [str(python), str(root / "rpc_adapter.py"), "--native", str(native), "--root", str(root), "--"]
+    direct = "openai_base_url=" + toml_string(NATIVE_URL)
+    adapter = root / "rpc_adapter.py"
     return ("#!/bin/sh\n"
             + f"if [ -x {shlex.quote(str(python))} ] && [ -r {shlex.quote(str(adapter))} ]; then\n"
             + "  exec " + " ".join(map(shlex.quote, [*argv, "-c", direct])) + ' "$@"\n'
             + "fi\n"
             + "exec " + " ".join(map(shlex.quote, [str(native), "-c", direct])) + ' "$@"\n').encode()
+
+
+def native_desktop_wrapper_content(native: Path) -> bytes:
+    direct = "openai_base_url=" + toml_string(NATIVE_URL)
+    return ("#!/bin/sh\nexec " + " ".join(map(shlex.quote, [str(native), "-c", direct]))
+            + ' "$@"\n').encode()
+
+
+def _make_desktop_wrapper_native(root: Path, manifest: dict) -> bool:
+    """Leave a safe launcher at a path Desktop may keep using after disable."""
+    desktop = manifest.get("desktop", {})
+    wrapper = Path(desktop.get("wrapper_path", root / "app-server-wrapper"))
+    if not wrapper.exists():
+        return False
+    if wrapper.is_symlink():
+        manifest.setdefault("preserved_user_changes", []).append("app-server-wrapper")
+        return False
+    native = Path(manifest["native_target"])
+    python = Path(desktop.get("python", DESKTOP_PYTHON))
+    current = wrapper.read_bytes()
+    safe = native_desktop_wrapper_content(native)
+    if current == safe:
+        return False
+    if current not in (desktop_wrapper_content(root, native, python),
+                       legacy_desktop_wrapper_content(root, native, python)):
+        manifest.setdefault("preserved_user_changes", []).append("app-server-wrapper")
+        return False
+    backup = root / "backups" / ("desktop-wrapper-disable-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                                   + "-" + secrets.token_hex(4))
+    backup.mkdir(mode=0o700, parents=True)
+    atomic_write(backup / "app-server-wrapper", current)
+    atomic_write(wrapper, safe, 0o700)
+    return True
 
 
 def desktop_wrapper_issue(root: Path, manifest: dict, check_native: bool = True) -> str | None:
@@ -337,7 +383,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         raise ValueError("TypeSafe key file missing or not owner-only")
     if agent_path.exists():
         raise ValueError("LaunchAgent already exists: " + str(agent_path))
-    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "cli_chat.py", "cli_bridge.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py"):
         if not (source_dir() / filename).exists():
             raise ValueError("missing source: " + filename)
     original_text = config_path.read_text()
@@ -353,7 +399,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = root / "backups" / ("config-" + timestamp + ".toml")
     atomic_write(backup, original_text.encode())
-    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "cli_chat.py", "cli_bridge.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py"):
         source = source_dir() / filename
         if not source.exists():
             raise ValueError("missing source: " + filename)
@@ -381,12 +427,14 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     }
     write_json(root / "config.json", config)
     managed = {
-        "model": 'model = "jev-shadow"\n',
-        "model_reasoning_effort": 'model_reasoning_effort = "medium"\n',
+        # Keep Desktop on native models. The CLI wrapper selects Jev aliases
+        # per invocation, with its own catalog override.
+        "model": before["model"],
+        "model_reasoning_effort": before["model_reasoning_effort"],
         # The Desktop adapter and CLI wrapper set their own execution endpoint.
         # A global relay URL can also affect built-in tools such as Image Gen.
         "openai_base_url": before["openai_base_url"],
-        "model_catalog_json": f'model_catalog_json = {toml_string(str(root / "models.json"))}\n',
+        "model_catalog_json": before["model_catalog_json"],
     }
     updated = edit_root(original_text, before, managed)
     python = python_executable()
@@ -480,12 +528,21 @@ def desktop_enable(root: Path = ROOT, agent_path: Path | None = None,
     if not python.is_file() or not os.access(python, os.X_OK):
         raise ValueError("Python 3.14 executable missing: " + str(python))
     source_adapter = source_dir() / "rpc_adapter.py"
-    if not source_adapter.is_file():
-        raise ValueError("missing source: rpc_adapter.py")
+    source_bootstrap = source_dir() / "desktop_bootstrap.py"
+    if not source_adapter.is_file() or not source_bootstrap.is_file():
+        raise ValueError("missing Desktop adapter or bootstrap source")
     installed_adapter = root / "rpc_adapter.py"
+    installed_bootstrap = root / "desktop_bootstrap.py"
     if installed_adapter.exists() and installed_adapter.read_bytes() != source_adapter.read_bytes():
         raise ValueError("installed rpc_adapter.py differs from source; refusing to overwrite")
-    if wrapper.exists() and wrapper.read_bytes() != content:
+    if installed_bootstrap.exists() and installed_bootstrap.read_bytes() != source_bootstrap.read_bytes():
+        raise ValueError("installed desktop_bootstrap.py differs from source; refusing to overwrite")
+    old_wrapper = wrapper.read_bytes() if wrapper.exists() else None
+    if wrapper.is_symlink():
+        raise ValueError("Desktop wrapper is a symlink; refusing to overwrite")
+    legacy_content = legacy_desktop_wrapper_content(root, Path(manifest["native_target"]), python)
+    safe_content = native_desktop_wrapper_content(Path(manifest["native_target"]))
+    if old_wrapper not in (None, content, legacy_content, safe_content):
         raise ValueError("Desktop wrapper changed; refusing to overwrite")
     if agent_path.exists():
         raise ValueError("Desktop environment LaunchAgent already exists: " + str(agent_path))
@@ -493,7 +550,23 @@ def desktop_enable(root: Path = ROOT, agent_path: Path | None = None,
     if previous == str(wrapper):
         raise ValueError("CODEX_CLI_PATH already points to an unowned wrapper")
     copied_adapter = not installed_adapter.exists()
+    copied_bootstrap = not installed_bootstrap.exists()
     created_wrapper = not wrapper.exists()
+    upgraded_wrapper = old_wrapper in (legacy_content, safe_content) and old_wrapper != content
+    config_path = Path(manifest["config_path"])
+    current_config = config_path.read_bytes()
+    current_fields = root_fields(current_config.decode())
+    original_catalog = manifest["original_root"].get("model_catalog_json")
+    if current_fields.get("model_catalog_json") != original_catalog:
+        raise ValueError("Desktop model catalog changed outside router; refusing to overwrite")
+    owned_catalog = f'model_catalog_json = {toml_string(str(root / "models.json"))}\n'
+    backup = root / "backups" / ("desktop-enable-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                                   + "-" + secrets.token_hex(4))
+    backup.mkdir(mode=0o700, parents=True)
+    atomic_write(backup / "config.toml", current_config)
+    atomic_write(backup / "manifest.json", manifest_path.read_bytes())
+    if old_wrapper is not None:
+        atomic_write(backup / "app-server-wrapper", old_wrapper)
     # Journal the old value before the LaunchAgent or launchctl can change it.
     manifest["desktop"] = {
         "opted_in": bool(desktop.get("opted_in")),
@@ -504,14 +577,22 @@ def desktop_enable(root: Path = ROOT, agent_path: Path | None = None,
         "wrapper_path": str(wrapper),
         "python": str(python),
         "env_changed_externally": False,
+        "previous_catalog": original_catalog,
     }
     write_json(manifest_path, manifest)
     try:
         if copied_adapter:
             shutil.copy2(source_adapter, installed_adapter)
             os.chmod(installed_adapter, 0o600)
-        if created_wrapper:
+        if copied_bootstrap:
+            shutil.copy2(source_bootstrap, installed_bootstrap)
+            os.chmod(installed_bootstrap, 0o600)
+        if created_wrapper or upgraded_wrapper:
             atomic_write(wrapper, content, 0o700)
+        updated_config = edit_root(config_path.read_text(),
+                                   {"model_catalog_json": original_catalog},
+                                   {"model_catalog_json": owned_catalog})
+        save_config(config_path, updated_config)
         agent_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(agent_path, desktop_plist_content(wrapper), 0o600)
         start_desktop_agent(agent_path)
@@ -525,15 +606,22 @@ def desktop_enable(root: Path = ROOT, agent_path: Path | None = None,
             "wrapper_path": str(wrapper),
             "python": str(python),
             "env_changed_externally": False,
+            "previous_catalog": original_catalog,
         }
+        manifest["managed_root"]["model_catalog_json"] = owned_catalog
         write_json(manifest_path, manifest)
     except Exception:
         # If cleanup fails, the prepared manifest remains for a later disable/rollback.
         desktop_disable(root)
-        if created_wrapper and wrapper.exists() and wrapper.read_bytes() == content:
-            wrapper.unlink()
         if copied_adapter and installed_adapter.exists() and installed_adapter.read_bytes() == source_adapter.read_bytes():
             installed_adapter.unlink()
+        if copied_bootstrap and installed_bootstrap.exists() and installed_bootstrap.read_bytes() == source_bootstrap.read_bytes():
+            installed_bootstrap.unlink()
+        # Keep the native-only launcher if Desktop cached this path.
+        if config_path.read_text() == edit_root(current_config.decode(),
+                                               {"model_catalog_json": original_catalog},
+                                               {"model_catalog_json": owned_catalog}):
+            save_config(config_path, current_config.decode())
         raise
 
 
@@ -556,6 +644,19 @@ def desktop_disable(root: Path = ROOT) -> None:
             restore_desktop_env(desktop.get("previous_env"))
     if agent_path.exists() and agent_path.read_bytes() == expected:
         agent_path.unlink()
+    _make_desktop_wrapper_native(root, manifest)
+    catalog = manifest.get("managed_root", {}).get("model_catalog_json")
+    previous_catalog = desktop.get("previous_catalog")
+    config_path = Path(manifest["config_path"])
+    if catalog and catalog != previous_catalog:
+        current_config = config_path.read_text()
+        if root_fields(current_config).get("model_catalog_json") == catalog:
+            save_config(config_path, edit_root(current_config,
+                                               {"model_catalog_json": catalog},
+                                               {"model_catalog_json": previous_catalog}))
+        else:
+            manifest.setdefault("preserved_user_changes", []).append("model_catalog_json")
+        manifest["managed_root"]["model_catalog_json"] = previous_catalog
     desktop["enabled"] = False
     desktop["phase"] = "disabled"
     desktop["env_changed_externally"] = changed
@@ -563,14 +664,70 @@ def desktop_disable(root: Path = ROOT) -> None:
     write_json(manifest_path, manifest)
 
 
+def desktop_safe(root: Path = ROOT) -> dict:
+    """Keep Desktop native and move synthetic model aliases to CLI-only config."""
+    manifest_path = root / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    config_path = Path(manifest["config_path"])
+    config_bytes = config_path.read_bytes()
+    fields = root_fields(config_bytes.decode())
+    managed_catalog = manifest["managed_root"].get("model_catalog_json")
+    original_catalog = manifest["original_root"].get("model_catalog_json")
+    if fields.get("model_catalog_json") not in (managed_catalog, original_catalog):
+        raise ValueError("model_catalog_json changed outside router; refusing to overwrite")
+    alias_model = fields.get("model") in ('model = "jev-auto"\n', 'model = "jev-shadow"\n')
+    desktop = manifest.get("desktop", {})
+    wrapper = Path(desktop.get("wrapper_path", root / "app-server-wrapper"))
+    native = Path(manifest["native_target"])
+    python = Path(desktop.get("python", DESKTOP_PYTHON))
+    wrapper_needs_safety = wrapper.is_file() and wrapper.read_bytes() in (
+        desktop_wrapper_content(root, native, python), legacy_desktop_wrapper_content(root, native, python))
+    if (not desktop.get("enabled") and not desktop.get("opted_in")
+            and fields.get("model_catalog_json") == original_catalog and not alias_model
+            and not wrapper_needs_safety):
+        return {"changed": False}
+    backup = root / "backups" / ("desktop-safe-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                                   + "-" + secrets.token_hex(4))
+    backup.mkdir(mode=0o700, parents=True)
+    atomic_write(backup / "config.toml", config_bytes)
+    atomic_write(backup / "manifest.json", manifest_bytes)
+    desktop_disable(root)
+    manifest = load_json(manifest_path)
+    _make_desktop_wrapper_native(root, manifest)
+    expected_after_disable = edit_root(config_bytes.decode(),
+                                       {"model_catalog_json": fields.get("model_catalog_json")},
+                                       {"model_catalog_json": original_catalog})
+    if config_path.read_text() not in (config_bytes.decode(), expected_after_disable):
+        raise ValueError("Codex config changed during Desktop safety migration; refusing to overwrite")
+    current = config_path.read_text()
+    current_fields = root_fields(current)
+    expected = {"model_catalog_json": current_fields.get("model_catalog_json")}
+    replacement = {"model_catalog_json": original_catalog}
+    if alias_model:
+        expected["model"] = current_fields.get("model")
+        replacement["model"] = f'model = {toml_string(load_json(root / "config.json")["fallback_model"])}\n'
+    updated = edit_root(current, expected, replacement)
+    if updated != current:
+        save_config(config_path, updated)
+    manifest["managed_root"]["model_catalog_json"] = original_catalog
+    manifest.setdefault("desktop", {})["opted_in"] = False
+    write_json(manifest_path, manifest)
+    return {"changed": True, "backup": str(backup)}
+
+
 def _remove_desktop_wrapper(root: Path, manifest: dict) -> None:
     desktop = manifest.get("desktop", {})
     if not desktop.get("wrapper_path"):
         return
     wrapper = Path(desktop["wrapper_path"])
-    expected = desktop_wrapper_content(root, Path(manifest["native_target"]), Path(desktop["python"]))
+    native = Path(manifest["native_target"])
+    python = Path(desktop.get("python", DESKTOP_PYTHON))
+    owned = (desktop_wrapper_content(root, native, python),
+             legacy_desktop_wrapper_content(root, native, python),
+             native_desktop_wrapper_content(native))
     if wrapper.exists():
-        if wrapper.read_bytes() != expected:
+        if wrapper.read_bytes() not in owned:
             manifest.setdefault("preserved_user_changes", []).append("app-server-wrapper")
         else:
             wrapper.unlink()
@@ -618,9 +775,7 @@ def enable(root: Path = ROOT, start: bool = True) -> None:
     write_json(root / "config.json", config)
     if start:
         start_agent()
-    if manifest.get("desktop", {}).get("opted_in") and not manifest["desktop"].get("env_changed_externally"):
-        desktop = manifest["desktop"]
-        desktop_enable(root, Path(desktop["agent_path"]), Path(desktop["python"]))
+    # Desktop opt-in is explicit; enabling CLI alone must not change its runtime.
 
 
 def rollback(root: Path = ROOT, stop: bool = True) -> None:
@@ -668,8 +823,19 @@ def update_catalog(root: Path = ROOT) -> None:
     generated = managed_catalog(native)
     old_alias = next((x for x in load_json(root / "models.json")["models"] if x.get("slug") == "jev-auto"), None)
     new_alias = next(x for x in generated["models"] if x.get("slug") == "jev-auto")
-    if manifest["config_state"] == "enabled" and old_alias != new_alias:
-        raise ValueError("Sol alias metadata changed; disable router, update catalog, then restart Desktop before enable")
+    if manifest.get("desktop", {}).get("enabled") and old_alias != new_alias:
+        raise ValueError("Desktop alias metadata changed; disable the Desktop adapter before updating catalog")
+    current_native = (root / "native-models.json").read_bytes()
+    current_managed = (root / "models.json").read_bytes()
+    current_config = (root / "config.json").read_bytes()
+    if native == json.loads(current_native) and generated == json.loads(current_managed):
+        return
+    backup = root / "backups" / ("catalog-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                                   + "-" + secrets.token_hex(4))
+    backup.mkdir(mode=0o700, parents=True)
+    atomic_write(backup / "native-models.json", current_native)
+    atomic_write(backup / "models.json", current_managed)
+    atomic_write(backup / "config.json", current_config)
     write_json(root / "native-models.json", native)
     write_json(root / "models.json", generated)
     config = load_json(root / "config.json")
@@ -718,12 +884,15 @@ def desktop_runtime(native_target: Path | None = None) -> dict:
     # launched from a Codex task also descend from it, but are not its transport.
     adapters = {pid for pid, (parent, command) in processes.items()
                 if "rpc_adapter.py --native " in command and parent in apps}
+    native_servers = set()
     result["adapter_active"] = bool(adapters)
     for pid, (parent, command) in processes.items():
         executable = command.split()[0]
         bundled_codex = ("/ChatGPT.app/Contents/Resources/" in executable and
                          Path(executable).name == "codex")
-        if not (executable == str(native_target) if native_target else bundled_codex):
+        # Desktop may launch its signed CodexCLI.app binary instead of the
+        # equivalent bin/codex entry point recorded in the manifest.
+        if not (executable == str(native_target) or bundled_codex):
             continue
         if "app-server" not in command:
             continue
@@ -731,6 +900,11 @@ def desktop_runtime(native_target: Path | None = None) -> dict:
             continue
         if parent in apps:
             result["direct_native_app_server"] = True
+            native_servers.add(pid)
+    sidecars = {pid for pid, (parent, command) in processes.items()
+                if parent in native_servers and ("desktop_bootstrap.py --native " in command
+                                                 or "desktop_bootstrap.py --sidecar " in command)}
+    result["adapter_active"] = bool(adapters or sidecars)
     return result
 
 
@@ -772,18 +946,21 @@ def status(root: Path = ROOT) -> dict:
         current_env = desktop_env()
     except (OSError, subprocess.TimeoutExpired):
         current_env = None
+    runtime = desktop_runtime(native_binary)
     desktop_status = {
         "opted_in": bool(desktop.get("opted_in")),
         "enabled": bool(desktop.get("enabled")),
         "env_points_to_wrapper": current_env == wrapper,
-        "env_present": current_env is not None,
+        "env_present": bool(current_env),
         "env_changed_externally": bool(desktop.get("env_changed_externally")),
         "wrapper_present": Path(wrapper).exists(),
         "wrapper_matches_native_target": wrapper_issue is None,
         "wrapper_issue": wrapper_issue,
         "launch_agent_present": Path(desktop.get("agent_path", DESKTOP_AGENT)).exists(),
+        "auto_routing_active": (bool(desktop.get("enabled")) and runtime["adapter_active"]
+                                and manifest["config_state"] == "enabled" and config.get("mode") != "off"),
         "limitation": "Desktop hostConfig.codex_cli_command overrides CODEX_CLI_PATH when set",
-        "runtime": desktop_runtime(native_binary),
+        "runtime": runtime,
     }
     return {
         "mode": config["mode"], "config_state": manifest["config_state"], "health": health(root),
@@ -825,8 +1002,9 @@ def doctor(root: Path = ROOT) -> dict:
         "desktop_wrapper_matches_native_target": desktop_wrapper_issue(root, manifest) is None,
         "managed_aliases_match_native_sol": aliases == expected_aliases,
         "gateway_healthy": current["health"],
-        "desktop_adapter_active": (not current["desktop"]["runtime"]["app_running"]
-                                  or current["desktop"]["runtime"]["adapter_active"]),
+        "desktop_adapter_active": (
+            not current["desktop"]["runtime"]["app_running"]
+            or current["desktop"]["runtime"]["adapter_active"] == current["desktop"].get("enabled", False)),
     }
     cache = Path(manifest.get("config_path", "")).parent / "models_cache.json"
     if cache.is_file():
@@ -846,6 +1024,8 @@ def doctor(root: Path = ROOT) -> dict:
     wrapper_issue = desktop_wrapper_issue(root, manifest)
     if wrapper_issue:
         issues.append(wrapper_issue)
+    if not checks["desktop_adapter_active"]:
+        issues.append("Desktop runtime does not match Jev enable/disable state; fully quit and reopen ChatGPT.app")
     if checks.get("account_catalog_matches_installed") is False:
         issues.append("account model cache differs from installed catalog; refresh native models before updating Jev")
     return {"ok": all(checks.values()), "checks": checks, "issues": issues,
@@ -1280,6 +1460,10 @@ def _cli_endpoint_args(root: Path, config: dict, route_token: str | None = None)
     return ["-c", "openai_base_url=" + toml_string(f"http://127.0.0.1:{port}/{capability}/cli{suffix}")]
 
 
+def _cli_alias_catalog_args(root: Path) -> list[str]:
+    return ["-c", "model_catalog_json=" + toml_string(str(root / "models.json"))]
+
+
 def _cli_effort_override(argv: list[str]) -> str | None:
     for index, arg in enumerate(argv):
         value = argv[index + 1] if arg in ("-c", "--config") and index + 1 < len(argv) else arg.partition("=")[2] if arg.startswith("--config=") else ""
@@ -1291,12 +1475,41 @@ def _cli_effort_override(argv: list[str]) -> str | None:
     return None
 
 
+def _strip_cli_alias_model(argv: list[str]) -> tuple[list[str], str | None]:
+    """Treat a requested Jev alias as a route selector, not an executor."""
+    clean: list[str] = []
+    alias = None
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        value = argv[index + 1] if index + 1 < len(argv) else None
+        if arg in ("-m", "--model") and value in ("jev-auto", "jev-shadow"):
+            alias, index = value, index + 2
+            continue
+        if arg.startswith("--model=") and arg.partition("=")[2] in ("jev-auto", "jev-shadow"):
+            alias, index = arg.partition("=")[2], index + 1
+            continue
+        config_value = value if arg in ("-c", "--config") else arg.partition("--config=")[2] if arg.startswith("--config=") else None
+        if config_value and config_value.startswith("model="):
+            selected = config_value.partition("=")[2].strip().strip("\"'")
+            if selected in ("jev-auto", "jev-shadow"):
+                alias, index = selected, index + (2 if arg in ("-c", "--config") else 1)
+                continue
+        clean.append(arg)
+        index += 1
+    return clean, alias
+
+
 def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list[str]:
     manifest = load_json(root / "manifest.json")
     native = manifest["native_target"]
     bypass = str(Path(manifest["bin_dir"]) / "codex-native")
     mode_flag = next((x for x in argv if x in ("--jev-auto", "--jev-shadow", "--jev-off")), None)
-    clean = [x for x in argv if x not in ("--jev-auto", "--jev-shadow", "--jev-off")]
+    clean, selected_alias = _strip_cli_alias_model(
+        [x for x in argv if x not in ("--jev-auto", "--jev-shadow", "--jev-off")])
+    if selected_alias and mode_flag is None:
+        mode_flag = "--jev-shadow" if selected_alias == "jev-shadow" else "--jev-auto"
+    logical_alias = "jev-shadow" if mode_flag == "--jev-shadow" else "jev-auto"
     command, prompt, explicit = _parse_cli(clean)
     config = load_json(root / "config.json")
     sol = config.get("fallback_model", SOL)
@@ -1312,11 +1525,11 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
     if explicit:
         return [native if healthy else bypass, *endpoint, *clean]
     if command == "resume":
-        return [native, *endpoint, *clean] if healthy else [bypass, "-m", sol, *clean]
+        return [native, *endpoint, *_cli_alias_catalog_args(root), *clean] if healthy else [bypass, "-m", sol, *clean]
     if prompt == "-":
-        return [native, *endpoint, "-m", "jev-auto", *clean] if healthy else [bypass, "-m", sol, *clean]
+        return [native, *endpoint, *_cli_alias_catalog_args(root), "-m", logical_alias, *clean] if healthy else [bypass, "-m", sol, *clean]
     if command == "interactive" and prompt is None:
-        return [native, *endpoint, "-m", "jev-auto", *clean] if healthy else [bypass, "-m", sol, *clean]
+        return [native, *endpoint, *_cli_alias_catalog_args(root), "-m", logical_alias, *clean] if healthy else [bypass, "-m", sol, *clean]
     if prompt is None:
         return [native if healthy else bypass, *endpoint, "-m", sol, *clean]
     if not enabled:
@@ -1324,7 +1537,7 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
     if not healthy:
         return [bypass, "-m", sol, *clean]
     if command == "exec-resume":
-        return [native, *endpoint, *clean]
+        return [native, *endpoint, *_cli_alias_catalog_args(root), *clean]
     from core import Router, cli_route_id
     payload = {"model": "jev-auto", "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt[:12000]}]}]}
     try:
@@ -1422,19 +1635,26 @@ def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
         elif arg.startswith("--config=model="):
             explicit = arg.partition("model=")[2].strip().strip("\"'")
     if explicit and explicit not in ("jev-auto", "jev-shadow"):
-        # Preserve a later /model -> Jev Auto switch in the same native TUI.
-        return args if codex_config.get("model") in ("jev-auto", "jev-shadow") else None
-    alias = ("jev-shadow" if "--jev-shadow" in argv else "jev-auto" if "--jev-auto" in argv
-             else explicit or codex_config.get("model"))
+        return None
+    if "--jev-shadow" in argv:
+        alias = "jev-shadow"
+    elif "--jev-auto" in argv:
+        alias = "jev-auto"
+    elif explicit in ("jev-auto", "jev-shadow"):
+        alias = explicit
+    elif codex_config.get("model") in ("jev-auto", "jev-shadow"):
+        alias = codex_config["model"]
+    else:
+        alias = "jev-shadow" if config.get("mode") == "shadow" else "jev-auto"
     if alias not in ("jev-auto", "jev-shadow"):
         return None
-    return args if explicit else ["-m", alias, *args]
+    return [*_cli_alias_catalog_args(root), *(args if explicit else ["-m", alias, *args])]
 
 
 def main() -> None:
     argv = sys.argv[1:]
     commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native",
-                "desktop-enable", "desktop-disable"}
+                "desktop-enable", "desktop-disable", "desktop-safe"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
     if invoked in ("jev-codex", "manage.py") and argv and argv[0] in commands:
@@ -1449,8 +1669,10 @@ def main() -> None:
                         key_path=Path(settings["--key-file"]) if "--key-file" in settings else None)
             elif cmd == "disable": disable()
             elif cmd == "enable": enable()
-            elif cmd == "desktop-enable": desktop_enable()
+            elif cmd == "desktop-enable":
+                desktop_enable()
             elif cmd == "desktop-disable": desktop_disable()
+            elif cmd == "desktop-safe": print(json.dumps(desktop_safe(), indent=2))
             elif cmd == "desktop-refresh-native":
                 if len(argv) != 3 or argv[1] != "--native":
                     raise ValueError("usage: jev-codex desktop-refresh-native --native /absolute/path/to/codex")

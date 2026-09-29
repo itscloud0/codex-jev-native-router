@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+import sys
 import tempfile
 import time
 import unittest
@@ -59,7 +60,8 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((self.root / "config.json").stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.root / "capability").stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(list((self.root / "backups").glob("*.toml"))), 1)
-        self.assertIn('model = "jev-shadow"', self.config.read_text())
+        self.assertIn('model = "gpt-6-astra"', self.config.read_text())
+        self.assertNotIn('model_catalog_json', self.config.read_text())
         self.assertNotIn("openai_base_url", self.config.read_text())
         self.assertEqual(manage.load_json(self.root / "config.json")["fallback_model"], "gpt-6-sol")
         self.assertEqual(manage.load_json(self.root / "config.json")["auto_roles"], ["luna", "terra", "sol"])
@@ -97,7 +99,7 @@ class InstallTests(unittest.TestCase):
         manage.enable(self.root, start=False)
         current = self.config.read_text()
         self.assertIn('model = "jev-auto"', current)
-        self.assertIn('model_catalog_json = ', current)
+        self.assertNotIn('model_catalog_json = ', current)
         self.assertNotIn("openai_base_url", current)
         migrated = manage.load_json(manifest_path)
         self.assertIsNone(migrated["managed_root"]["openai_base_url"])
@@ -122,6 +124,35 @@ class InstallTests(unittest.TestCase):
         sample = "\n".join(line for line in sample.splitlines() if not line.startswith("12 "))
         with mock.patch.object(manage.subprocess, "run", return_value=mock.Mock(stdout=sample)):
             self.assertFalse(manage.desktop_runtime(native)["adapter_active"])
+        signed = """10 1 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+11 10 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server
+"""
+        with mock.patch.object(manage.subprocess, "run", return_value=mock.Mock(stdout=signed)):
+            self.assertTrue(manage.desktop_runtime(native)["direct_native_app_server"])
+            self.assertFalse(manage.desktop_runtime(native)["adapter_active"])
+        signed += "12 11 /opt/homebrew/bin/python3.14 /tmp/desktop_bootstrap.py --sidecar --root /tmp --to-native-fd 4 --from-native-fd 5\n"
+        with mock.patch.object(manage.subprocess, "run", return_value=mock.Mock(stdout=signed)):
+            self.assertTrue(manage.desktop_runtime(native)["adapter_active"])
+
+    def test_doctor_accepts_intentionally_native_desktop(self):
+        self.install()
+        with (mock.patch.object(manage, "health", return_value=True),
+              mock.patch.object(manage, "desktop_env", return_value=""),
+              mock.patch.object(manage, "desktop_runtime", return_value={
+                  "app_running": True, "adapter_active": False,
+                  "direct_native_app_server": True})):
+            current = manage.status(self.root)
+            self.assertFalse(current["desktop"]["auto_routing_active"])
+            self.assertFalse(current["desktop"]["env_present"])
+            self.assertTrue(manage.doctor(self.root)["checks"]["desktop_adapter_active"])
+        with (mock.patch.object(manage, "health", return_value=True),
+              mock.patch.object(manage, "desktop_env", return_value=""),
+              mock.patch.object(manage, "desktop_runtime", return_value={
+                  "app_running": True, "adapter_active": True,
+                  "direct_native_app_server": True})):
+            pending_restart = manage.doctor(self.root)
+            self.assertFalse(pending_restart["ok"])
+            self.assertIn("fully quit and reopen", pending_restart["issues"][0])
 
     def test_desktop_refresh_native_after_app_update(self):
         self.install()
@@ -181,7 +212,7 @@ class InstallTests(unittest.TestCase):
 
     def test_rollback_preserves_manual_model(self):
         self.install()
-        self.config.write_text(self.config.read_text().replace('model = "jev-shadow"', 'model = "custom"'))
+        self.config.write_text(self.config.read_text().replace('model = "gpt-6-astra"', 'model = "custom"'))
         manage.rollback(self.root, stop=False)
         self.assertIn('model = "custom"', self.config.read_text())
         self.assertNotIn("openai_base_url", self.config.read_text())
@@ -225,6 +256,11 @@ class InstallTests(unittest.TestCase):
                 self.assertEqual(args.count("model_reasoning_effort=high"), 1)
                 self.assertIn("gpt-6-sol", args)
                 decide.assert_called_once()
+            with mock.patch.object(core.Router, "decide", return_value={"model": "gpt-6-sol", "effort": "low"}) as decide:
+                args = manage.cli_args(["exec", "-m", "jev-auto", "Fix tests"], self.root)
+                self.assertIn("gpt-6-sol", args)
+                self.assertNotIn("jev-auto", args)
+                decide.assert_called_once()
             self.assertEqual(manage.cli_args(["-m", "gpt-6-sol", "exec", "Fix"], self.root)[-4:], ["-m", "gpt-6-sol", "exec", "Fix"])
             self.assertEqual(manage.cli_args(["-c", 'model="gpt-6-sol"', "exec", "Fix"], self.root)[-4:], ["-c", 'model="gpt-6-sol"', "exec", "Fix"])
             self.assertEqual(manage.cli_args(["exec", "resume", "id", "continue"], self.root)[-4:], ["exec", "resume", "id", "continue"])
@@ -263,23 +299,25 @@ class InstallTests(unittest.TestCase):
 
     def test_native_tui_bridge_preserves_interactive_auto_and_resume(self):
         self.install()
-        self.config.write_text(self.config.read_text().replace('model = "jev-shadow"', 'model = "jev-auto"'))
+        router_config = manage.load_json(self.root / "config.json")
+        router_config["mode"] = "auto"
+        manage.write_json(self.root / "config.json", router_config)
+        catalog_args = manage._cli_alias_catalog_args(self.root)
         thread = "01a0cab0-65a9-7233-8a01-9e7df612e94b"
         with mock.patch.object(manage, "health", return_value=True):
-            self.assertEqual(manage.cli_bridge_args([], self.root), ["-m", "jev-auto"])
+            self.assertEqual(manage.cli_bridge_args([], self.root), [*catalog_args, "-m", "jev-auto"])
             self.assertEqual(manage.cli_bridge_args(["resume", thread], self.root),
-                             ["-m", "jev-auto", "resume", thread])
+                             [*catalog_args, "-m", "jev-auto", "resume", thread])
             self.assertIsNone(manage.cli_bridge_args(["exec", "Fix tests"], self.root))
-            self.assertEqual(manage.cli_bridge_args(["-m", "gpt-6-sol"], self.root), ["-m", "gpt-6-sol"])
-            self.assertEqual(manage.cli_bridge_args(['--config=model="gpt-6-sol"'], self.root),
-                             ['--config=model="gpt-6-sol"'])
+            self.assertIsNone(manage.cli_bridge_args(["-m", "gpt-6-sol"], self.root))
+            self.assertIsNone(manage.cli_bridge_args(['--config=model="gpt-6-sol"'], self.root))
             self.assertEqual(manage.cli_bridge_args(["resume", "--last"], self.root),
-                             ["-m", "jev-auto", "resume", "--last"])
+                             [*catalog_args, "-m", "jev-auto", "resume", "--last"])
             self.assertEqual(manage.cli_bridge_args(["--jev-shadow"], self.root),
-                             ["-m", "jev-shadow"])
+                             [*catalog_args, "-m", "jev-shadow"])
             self.assertIsNone(manage.cli_bridge_args(["--remote", "ws://127.0.0.1:12"], self.root))
-            self.config.write_text(self.config.read_text().replace('model = "jev-auto"', 'model = "gpt-6-sol"'))
-            self.assertIsNone(manage.cli_bridge_args([], self.root))
+            self.config.write_text(self.config.read_text().replace('model = "gpt-6-astra"', 'model = "gpt-6-sol"'))
+            self.assertEqual(manage.cli_bridge_args([], self.root), [*catalog_args, "-m", "jev-auto"])
             self.config.write_text('model = "jev-auto"\nmodel_provider = "other"\n')
             self.assertIsNone(manage.cli_bridge_args([], self.root))
 
@@ -335,7 +373,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(manifest["desktop"]["previous_env"], prior)
         self.assertTrue(desktop_agent.exists())
         self.assertTrue(wrapper.stat().st_mode & 0o100)
-        self.assertIn("rpc_adapter.py", wrapper.read_text())
+        self.assertIn("desktop_bootstrap.py", wrapper.read_text())
         self.assertIn("--native", wrapper.read_text())
         self.assertIn("--root", wrapper.read_text())
         self.assertIn('"$@"', wrapper.read_text())
@@ -349,16 +387,16 @@ class InstallTests(unittest.TestCase):
 
         manage.enable(self.root, start=False)
         self.assertEqual(self.config.read_bytes(), installed_config)
-        self.assertEqual(current["value"], str(wrapper))
-        self.assertTrue(desktop_agent.exists())
-        self.assertTrue(manage.load_json(self.root / "manifest.json")["desktop"]["enabled"])
+        self.assertEqual(current["value"], prior)
+        self.assertFalse(desktop_agent.exists())
+        self.assertFalse(manage.load_json(self.root / "manifest.json")["desktop"]["enabled"])
         manage.rollback(self.root, stop=False)
         self.assertEqual(current["value"], prior)
         self.assertFalse(wrapper.exists())
         self.assertFalse(desktop_agent.exists())
         self.assertEqual(os.readlink(self.codex), str(self.real))
         self.assertEqual([call[0] for call in calls if call[0] in ("setenv", "unsetenv")],
-                         ["setenv", "setenv", "setenv", "setenv"])
+                         ["setenv", "setenv"])
 
     def test_desktop_wrapper_falls_back_when_adapter_runtime_missing(self):
         native = self.base / "native-fallback"
@@ -372,6 +410,55 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.splitlines(), ["-c", 'openai_base_url="https://chatgpt.com/backend-api/codex"',
                                                        "-c", "features.code_mode_host=true", "app-server"])
+
+    def test_desktop_upgrade_legacy_wrapper_preserves_config_and_rejects_user_edit(self):
+        self.install()
+        desktop_agent = self.base / "desktop-env.plist"
+        current, _, _, _ = self.mock_desktop_launchctl(None)
+        wrapper = self.root / "app-server-wrapper"
+        test_python = Path(sys.executable)
+        legacy = manage.legacy_desktop_wrapper_content(self.root, self.real, test_python)
+        wrapper.write_bytes(legacy + b"# user edit\n")
+        wrapper.chmod(0o700)
+        with self.assertRaisesRegex(ValueError, "wrapper changed"):
+            manage.desktop_enable(self.root, desktop_agent, test_python)
+        wrapper.write_bytes(legacy)
+        manage.desktop_enable(self.root, desktop_agent, test_python)
+        self.assertIn("desktop_bootstrap.py", wrapper.read_text())
+        self.assertIn("model_catalog_json", self.config.read_text())
+        self.assertEqual(current["value"], str(wrapper))
+        backups = list((self.root / "backups").glob("desktop-enable-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "app-server-wrapper").read_bytes(), legacy)
+        result = manage.desktop_safe(self.root)
+        self.assertTrue(result["changed"])
+        self.assertNotIn("model_catalog_json", self.config.read_text())
+        self.assertIsNone(current["value"])
+        self.assertEqual(wrapper.read_bytes(), manage.native_desktop_wrapper_content(self.real))
+        self.assertFalse(manage.desktop_safe(self.root)["changed"])
+        manage.desktop_enable(self.root, desktop_agent, test_python)
+        self.assertIn("desktop_bootstrap.py", wrapper.read_text())
+
+    def test_desktop_safe_preserves_external_wrapper_edit(self):
+        self.install()
+        desktop_agent = self.base / "desktop-env.plist"
+        self.mock_desktop_launchctl(None)
+        manage.desktop_enable(self.root, desktop_agent, Path(sys.executable))
+        wrapper = self.root / "app-server-wrapper"
+        edited = wrapper.read_bytes() + b"# owner customization\n"
+        wrapper.write_bytes(edited)
+        manage.desktop_safe(self.root)
+        self.assertEqual(wrapper.read_bytes(), edited)
+        self.assertIn("app-server-wrapper", manage.load_json(self.root / "manifest.json")["preserved_user_changes"])
+
+    def test_desktop_enable_refuses_linked_wrapper(self):
+        self.install()
+        external = self.base / "external-wrapper"
+        external.write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "app-server-wrapper").symlink_to(external)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            manage.desktop_enable(self.root, self.base / "desktop-env.plist", Path(sys.executable))
+        self.assertEqual(external.read_text(), "#!/bin/sh\nexit 0\n")
 
     def test_desktop_enable_failure_recovers_prior_env_from_journal(self):
         self.install()
@@ -391,7 +478,8 @@ class InstallTests(unittest.TestCase):
             manage.desktop_enable(self.root, desktop_agent, self.real)
         self.assertEqual(current["value"], prior)
         self.assertFalse(desktop_agent.exists())
-        self.assertFalse((self.root / "app-server-wrapper").exists())
+        self.assertEqual((self.root / "app-server-wrapper").read_bytes(),
+                         manage.native_desktop_wrapper_content(self.real))
         desktop = manage.load_json(self.root / "manifest.json")["desktop"]
         self.assertEqual(desktop["phase"], "disabled")
         self.assertFalse(desktop["opted_in"])
@@ -421,7 +509,30 @@ class InstallTests(unittest.TestCase):
         manage.desktop_disable(self.root)
         self.assertIsNone(current["value"])
         self.assertEqual(manage.load_json(self.root / "manifest.json")["config_state"], "enabled")
-        self.assertIn('model = "jev-shadow"', self.config.read_text())
+        self.assertIn('model = "gpt-6-astra"', self.config.read_text())
+
+    def test_desktop_safe_migrates_legacy_alias_without_overwriting_user_catalog(self):
+        self.install()
+        manifest_path = self.root / "manifest.json"
+        manifest = manage.load_json(manifest_path)
+        owned = f'model_catalog_json = "{self.root / "models.json"}"\n'
+        manifest["managed_root"]["model_catalog_json"] = owned
+        manifest["desktop"] = {"opted_in": True, "enabled": False}
+        manage.write_json(manifest_path, manifest)
+        self.config.write_text('model = "jev-auto"\n' + owned + '# owner text\n[features]\nsearch = true\n')
+        result = manage.desktop_safe(self.root)
+        self.assertTrue(result["changed"])
+        self.assertEqual((Path(result["backup"]) / "config.toml").read_text().splitlines()[0],
+                         'model = "jev-auto"')
+        self.assertIn('model = "gpt-6-sol"', self.config.read_text())
+        self.assertNotIn("model_catalog_json", self.config.read_text())
+        self.assertTrue((self.root / "config.json").exists())
+        self.assertFalse(manage.load_json(manifest_path)["desktop"]["opted_in"])
+        self.assertFalse(manage.desktop_safe(self.root)["changed"])
+        self.config.write_text(self.config.read_text().replace('[features]',
+            'model_catalog_json = "/custom/catalog.json"\n[features]'))
+        with self.assertRaisesRegex(ValueError, "changed outside router"):
+            manage.desktop_safe(self.root)
 
     def test_desktop_enable_refuses_existing_setter(self):
         self.install()
@@ -628,6 +739,25 @@ class InstallTests(unittest.TestCase):
             native["models"][0]["model_messages"] = {"base_instructions": "changed"}
             manage.write_json(self.root / "native-models.json", native)
             self.assertFalse(manage.doctor(self.root)["checks"]["managed_aliases_match_native_sol"])
+
+    def test_update_catalog_repairs_cli_only_drift_and_is_idempotent(self):
+        self.install()
+        cache = manage.load_json(self.cache)
+        cache["fetched_at"] = manage.dt.datetime.now(manage.dt.timezone.utc).isoformat()
+        cache["models"][0]["supports_reasoning_effort_updates"] = True
+        manage.write_json(self.cache, cache)
+        with mock.patch.object(manage, "status", return_value={"health": True, "desktop": {
+                "runtime": {"app_running": False, "adapter_active": False}}}):
+            self.assertFalse(manage.doctor(self.root)["ok"])
+            manage.update_catalog(self.root)
+            self.assertTrue(manage.doctor(self.root)["ok"])
+            backups = list((self.root / "backups").glob("catalog-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertTrue((backups[0] / "native-models.json").is_file())
+            updated = (self.root / "models.json").read_bytes()
+            manage.update_catalog(self.root)
+            self.assertEqual((self.root / "models.json").read_bytes(), updated)
+            self.assertEqual(list((self.root / "backups").glob("catalog-*")), backups)
 
 
 if __name__ == "__main__":

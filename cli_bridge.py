@@ -169,7 +169,8 @@ def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20,
 def _serve_connection(connection: socket.socket, stream, root: Path, native: Path) -> None:
     _debug("connected")
     with connection, stream:
-        child = subprocess.Popen([str(native), "app-server", "--listen", "stdio://"],
+        child = subprocess.Popen([str(native), "-c", "model_catalog_json=" + json.dumps(str(root / "models.json")),
+                                  "app-server", "--listen", "stdio://"],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
         adapter = Adapter(root, client="cli")
         assert child.stdin is not None and child.stdout is not None
