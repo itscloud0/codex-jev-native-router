@@ -353,14 +353,16 @@ class InstallTests(unittest.TestCase):
         self.assertTrue((Path(changed["backup"]) / "manifest.json").is_file())
         self.assertFalse(manage.cli_set_target(newer, self.root)["changed"])
         self.assertEqual(len(list((self.root / "backups").glob("cli-target-*"))), 1)
-        self.assertEqual(manage.cli_args(["update"], self.root), [str(newer), "update"])
+        with mock.patch.object(manage, "health", return_value=True):
+            self.assertEqual(manage.cli_args(["update"], self.root), [str(newer), "update"])
         self.assertEqual(manage.native_args(["--version"], self.root)[0], str(newer))
         manifest = manage.load_json(self.root / "manifest.json")
         self.assertEqual(manifest["native_target"], str(self.real))
         self.assertEqual(manage.status(self.root)["cli_binary"], str(newer))
         self.assertTrue(manage.doctor(self.root)["checks"]["cli_binary_executable"])
         newer.unlink()
-        self.assertEqual(manage.cli_args(["update"], self.root), [str(self.real), "update"])
+        with mock.patch.object(manage, "health", return_value=True):
+            self.assertEqual(manage.cli_args(["update"], self.root), [str(self.real), "update"])
         self.assertFalse(manage.doctor(self.root)["checks"]["cli_binary_executable"])
         self.assertIn("falls back", " ".join(manage.doctor(self.root)["issues"]))
 
