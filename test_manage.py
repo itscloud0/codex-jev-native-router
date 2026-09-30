@@ -328,6 +328,26 @@ class InstallTests(unittest.TestCase):
         self.assertIn("model_catalog_json=" + manage.toml_string(
             str(manage.cli_catalog_path(self.root, "native-models.json"))), args)
 
+    def test_global_shadow_alias_is_default_in_cli_and_keeps_effort(self):
+        self.install()
+        self.config.write_text(self.config.read_text().replace('model = "gpt-6-astra"',
+                                                        'model = "jev-shadow"\nmodel_reasoning_effort = "high"'))
+        import core
+        decision = {"model": "gpt-6-sol", "effort": "medium", "mode": "shadow",
+                    "proposed_model": "gpt-6-luna", "proposed_effort": "low"}
+        with mock.patch.object(manage, "health", return_value=True), \
+             mock.patch.object(core.Router, "decide", return_value=decision) as decide:
+            self.assertIn("jev-shadow", manage.cli_bridge_args([], self.root))
+            args = manage.cli_args(["exec", "Reply OK"], self.root)
+            self.assertEqual(decide.call_args.kwargs["mode_override"], "shadow")
+            self.assertEqual(args[args.index("-m") + 1], "gpt-6-sol")
+            receipt = json.loads((self.root / "state/telemetry.jsonl").read_text().splitlines()[-1])
+            self.assertEqual((receipt["effort"], receipt["proposed_effort"]), ("high", "low"))
+            manage.cli_args(["--jev-auto", "exec", "Reply OK"], self.root)
+            self.assertEqual(decide.call_args.kwargs["mode_override"], "auto")
+            manual = manage.cli_args(["-m", "gpt-6-sol", "exec", "Reply OK"], self.root)
+            self.assertEqual(manual[-4:], ["-m", "gpt-6-sol", "exec", "Reply OK"])
+
     def test_interactive_cli_keeps_local_auto_alias_and_resume(self):
         self.install()
         with mock.patch.object(manage, "health", return_value=True):
@@ -444,6 +464,49 @@ class InstallTests(unittest.TestCase):
                                       catalog_path=manage.cli_catalog_path(self.root, "native-models.json"))
         self.assertEqual(adapter.router.catalog_path, manage.cli_catalog_path(self.root, "native-models.json"))
         self.assertFalse(manage.cli_refresh_catalog(source, self.root)["changed"])
+
+    def test_desktop_catalog_refresh_uses_bundled_binary_and_preserves_config(self):
+        self.install()
+        fresh = manage.load_json(self.cache)
+        fresh["models"].append({"slug": "gpt-6.1-sol", "visibility": "list",
+                                "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}]})
+        before_config = self.config.read_bytes()
+        before_native = (self.root / "native-models.json").read_bytes()
+        seen = []
+
+        def validate(argv, **kwargs):
+            seen.append(argv)
+            candidate = Path(argv[2].partition("=")[2].strip('"'))
+            return subprocess.CompletedProcess(argv, 0, candidate.read_bytes(), b"")
+
+        with mock.patch.object(manage, "fetch_account_catalog", return_value=fresh) as fetch, \
+             mock.patch.object(manage.subprocess, "run", side_effect=validate):
+            changed = manage.desktop_refresh_catalog(self.root)
+            again = manage.desktop_refresh_catalog(self.root)
+        self.assertTrue(changed["changed"])
+        self.assertFalse(again["changed"])
+        self.assertEqual(changed["sol"], "gpt-6.1-sol")
+        self.assertEqual(self.config.read_bytes(), before_config)
+        self.assertEqual((Path(changed["backup"]) / "native-models.json").read_bytes(), before_native)
+        self.assertEqual(len(list((self.root / "backups").glob("desktop-models-*"))), 1)
+        self.assertEqual(fetch.call_args.args[0], self.real)
+        self.assertEqual(seen[0][0], str(self.real))
+        self.assertEqual(manage.select_sol(manage.native_catalog(self.root / "native-models.json")), "gpt-6.1-sol")
+        self.assertTrue(manage.doctor(self.root)["checks"]["managed_aliases_match_native_sol"])
+
+    def test_desktop_catalog_refresh_refuses_manual_changes(self):
+        self.install()
+        managed_path = self.root / "models.json"
+        managed = manage.load_json(managed_path)
+        managed["models"][-1]["description"] = "user edit"
+        manage.write_json(managed_path, managed)
+        before = managed_path.read_bytes()
+        with mock.patch.object(manage, "fetch_account_catalog") as fetch:
+            with self.assertRaisesRegex(ValueError, "modified"):
+                manage.desktop_refresh_catalog(self.root)
+        fetch.assert_not_called()
+        self.assertEqual(managed_path.read_bytes(), before)
+        self.assertFalse(list((self.root / "backups").glob("desktop-models-*")))
 
     def test_cli_account_catalog_uses_isolated_auth_and_preserves_original(self):
         self.install()
@@ -912,6 +975,9 @@ class InstallTests(unittest.TestCase):
 
     def test_doctor_detects_catalog_drift_without_changing_files(self):
         self.install()
+        cache = manage.load_json(self.cache)
+        cache["fetched_at"] = manage.dt.datetime.now(manage.dt.timezone.utc).isoformat()
+        manage.write_json(self.cache, cache)
         with mock.patch.object(manage, "status", return_value={"health": True, "desktop": {
                 "runtime": {"app_running": False, "adapter_active": False}}}):
             before = (self.root / "models.json").read_bytes()
@@ -930,6 +996,10 @@ class InstallTests(unittest.TestCase):
             drift = manage.doctor(self.root)
             self.assertFalse(drift["checks"]["account_catalog_matches_installed"])
             self.assertIn("account model cache differs", drift["issues"][-1])
+            cache["fetched_at"] = (manage.dt.datetime.now(manage.dt.timezone.utc)
+                                   - manage.dt.timedelta(hours=1)).isoformat()
+            manage.write_json(self.cache, cache)
+            self.assertNotIn("account_catalog_matches_installed", manage.doctor(self.root)["checks"])
             native = manage.load_json(self.root / "native-models.json")
             native["models"][0]["model_messages"] = {"base_instructions": "changed"}
             manage.write_json(self.root / "native-models.json", native)

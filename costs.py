@@ -96,20 +96,26 @@ def cost_report(rows: list[dict], hours: int = 168, since: float | None = None) 
         cutoff = max(cutoff, since)
     rows = [row for row in rows if isinstance(row.get("ts"), (int, float)) and row["ts"] >= cutoff]
     routes = {row["route_id"]: row for row in rows
-              if row.get("event") == "route" and row.get("mode") == "auto"
+              if row.get("event") == "route" and row.get("mode") in ("auto", "shadow")
               and isinstance(row.get("route_id"), str) and re.fullmatch(r"[a-f0-9]{24}", row["route_id"])}
+    auto_routes = {key: row for key, row in routes.items() if row["mode"] == "auto"}
+    shadow_routes = {key: row for key, row in routes.items() if row["mode"] == "shadow"}
     usage = [row for row in rows if row.get("event") == "usage"]
     linked = []
+    shadow_linked = []
     clients = defaultdict(list)
     for row in usage:
         route = routes.get(row.get("route_id"))
         native_cli_launch = (route and route.get("client") == "cli" and row.get("mode") == "native"
                              and isinstance(route.get("turn_hash"), str) and bool(route["turn_hash"])
                              and route["turn_hash"] == row.get("turn_hash"))
-        if (route and (row.get("mode") == "auto" or native_cli_launch)
+        if (route and (row.get("mode") == route.get("mode") or native_cli_launch)
                 and all(route.get(key) == row.get(key) for key in ("session", "client", "model", "effort"))):
-            linked.append(row)
-            clients[str(row.get("client"))].append(row)
+            if route["mode"] == "auto":
+                linked.append(row)
+                clients[str(row.get("client"))].append(row)
+            else:
+                shadow_linked.append(row)
     linked_ids = {id(row) for row in linked}
     # A pre-routed `codex exec` sends its concrete model to native Codex, so the
     # gateway marks that exact request native. The route ID and turn hash prove
@@ -124,8 +130,8 @@ def cost_report(rows: list[dict], hours: int = 168, since: float | None = None) 
     metered = [row for row in jev_routes if isinstance(row.get("jev_input_tokens"), int) and isinstance(row.get("jev_output_tokens"), int)]
     return {
         "window_hours": hours, "since": cutoff,
-        "auto": {"route_decisions": len(routes), "linked_calls": len(linked),
-                 "unlinked_decisions": len(routes) - len({row.get("route_id") for row in linked}),
+        "auto": {"route_decisions": len(auto_routes), "linked_calls": len(linked),
+                 "unlinked_decisions": len(auto_routes) - len({row.get("route_id") for row in linked}),
                  "observed_all_auto": _view(auto_usage),
                  "unlinked_auto_calls": len(auto_usage) - len(linked),
                  "all_clients": _view(linked), "by_client": {key: _view(value) for key, value in sorted(clients.items())},
@@ -138,6 +144,10 @@ def cost_report(rows: list[dict], hours: int = 168, since: float | None = None) 
                                                        if row.get("reason") == "requires_native_model_selection")),
                      "observed": _view(late_cli),
                      "note": "Native CLI TUI/resume reaches the gateway after model setup. Calls are not independent user turns; distinct session/turn hashes are a lower-bound grouping. This path cannot safely change the executor model."}},
+        "shadow": {"route_decisions": len(shadow_routes), "linked_calls": len(shadow_linked),
+                   "unlinked_decisions": len(shadow_routes) - len({row.get("route_id") for row in shadow_linked}),
+                   "observed_executor": _view(shadow_linked),
+                   "note": "Shadow proposals were not executed. Native CLI calls are linked only by exact route, session, turn, model, and effort; this is observed Sol baseline usage, not achieved routing savings."},
         "observed_all_modes": _view(usage),
         "jev": {"route_decisions": len(jev_routes), "metered_requests": len(metered),
                 "input_tokens": sum(row["jev_input_tokens"] for row in metered),
@@ -179,6 +189,10 @@ def format_savings(report: dict) -> str:
         (f"Current GPT-6.1-Sol rate sensitivity, same tokens: all-6.1-Sol {all_sol_6_1:.4f}; difference {all_auto_credits['vs_sol_6_1']:+.4f} ({all_pct_6_1:+.2f}%). Not a historically available or quality-matched baseline."
          if all_pct_6_1 is not None else "Current GPT-6.1-Sol rate sensitivity: unavailable (no priced calls)"),
         f"Pre-turn routes: {auto['route_decisions']} | linked calls: {auto['linked_calls']} | priced: {priced} | missing usage/rate: {view['unpriced_calls']}",
+        (f"Shadow baseline: {report['shadow']['route_decisions']} decisions | {report['shadow']['linked_calls']} linked Sol calls | "
+         f"{report['shadow']['observed_executor']['tokens']['uncached_input']} uncached / "
+         f"{report['shadow']['observed_executor']['tokens']['cached_input']} cached input / "
+         f"{report['shadow']['observed_executor']['tokens']['output']} output tokens; proposals did not execute"),
         f"Unlinked CLI gateway: {late['distinct_session_turns']} turns, {late['observed']['calls']} calls (included above; excluded from linked subset)",
         (f"Cache detail provenance: {all_auto['cache_metadata']['observed_calls']} observed, "
          f"{all_auto['cache_metadata']['missing_calls']} missing, "

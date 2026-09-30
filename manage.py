@@ -444,6 +444,57 @@ def cli_refresh_catalog(catalog_path: Path | None = None, root: Path = ROOT) -> 
     return {"changed": True, "sol": select_sol(native), "backup": str(backup)}
 
 
+def desktop_refresh_catalog(root: Path = ROOT) -> dict:
+    """Refresh Desktop aliases from its own authenticated native Codex binary."""
+    manifest = load_json(root / "manifest.json")
+    binary = Path(manifest["native_target"])
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise ValueError("Desktop native Codex is missing or not executable")
+    native_path, managed_path = root / "native-models.json", root / "models.json"
+    previous_native, previous_managed = native_path.read_bytes(), managed_path.read_bytes()
+    current_native = native_catalog(native_path)
+    if load_json(managed_path) != managed_catalog(current_native):
+        raise ValueError("Desktop model catalog was modified; refusing to overwrite it")
+    auth = Path(manifest["config_path"]).parent / "auth.json"
+    native = fetch_account_catalog(binary, auth)
+    managed = managed_catalog(native)
+    with tempfile.TemporaryDirectory(prefix="jev-desktop-catalog-check-") as directory:
+        candidate = Path(directory) / "models.json"
+        write_json(candidate, managed)
+        try:
+            result = subprocess.run([str(binary), "-c", "model_catalog_json=" + toml_string(str(candidate)),
+                                     "debug", "models"], capture_output=True, timeout=20, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("Desktop native Codex catalog validation timed out") from exc
+        if result.returncode or len(result.stdout) > 8 * 1024 * 1024:
+            raise ValueError("Desktop native Codex rejected the refreshed catalog")
+        try:
+            validated = json.loads(result.stdout)
+            slugs = {item.get("slug") for item in validated["models"] if isinstance(item, dict)}
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError("Desktop native Codex returned invalid refreshed metadata") from exc
+        if select_sol(native) not in slugs or "jev-shadow" not in slugs or "jev-auto" not in slugs:
+            raise ValueError("Desktop native Codex did not load the refreshed models")
+    if (native == current_native and managed == load_json(managed_path)):
+        return {"changed": False, "sol": select_sol(native)}
+    backup = root / "backups" / ("desktop-models-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                                   + "-" + secrets.token_hex(4))
+    backup.mkdir(mode=0o700, parents=True)
+    atomic_write(backup / "native-models.json", previous_native)
+    atomic_write(backup / "models.json", previous_managed)
+    if native_path.read_bytes() != previous_native or managed_path.read_bytes() != previous_managed:
+        raise ValueError("Desktop model catalog changed during refresh; refusing to overwrite")
+    try:
+        write_json(native_path, native)
+        write_json(managed_path, managed)
+    except BaseException:
+        atomic_write(native_path, previous_native)
+        atomic_write(managed_path, previous_managed)
+        raise
+    return {"changed": True, "sol": select_sol(native), "backup": str(backup),
+            "restart_required": bool(manifest.get("desktop", {}).get("enabled"))}
+
+
 def cli_update_and_refresh(root: Path = ROOT) -> int:
     """Run the native CLI updater, then refresh only the CLI account catalog."""
     native = cli_target(load_json(root / "manifest.json"))
@@ -1160,15 +1211,19 @@ def doctor(root: Path = ROOT) -> dict:
     cache = Path(manifest.get("config_path", "")).parent / "models_cache.json"
     if cache.is_file():
         try:
-            refreshed = native_catalog(cache)
-            # Description and picker order change often; only execution and
-            # capability metadata requires reinstalling a managed catalog.
-            def execution_view(catalog: dict) -> list[dict]:
-                return [{key: value for key, value in item.items() if key not in ("description", "priority")}
-                        for item in catalog["models"]]
-            checks["account_catalog_matches_installed"] = execution_view(refreshed) == execution_view(native)
-        except (OSError, ValueError, TypeError):
-            checks["account_catalog_matches_installed"] = False
+            cached = load_json(cache)
+            fetched = dt.datetime.fromisoformat(cached["fetched_at"].replace("Z", "+00:00"))
+            age = (dt.datetime.now(dt.timezone.utc) - fetched).total_seconds()
+            if 0 <= age <= 600:
+                refreshed = native_catalog(cache)
+                # Description and picker order change often; only execution and
+                # capability metadata requires reinstalling a managed catalog.
+                def execution_view(catalog: dict) -> list[dict]:
+                    return [{key: value for key, value in item.items() if key not in ("description", "priority")}
+                            for item in catalog["models"]]
+                checks["account_catalog_matches_installed"] = execution_view(refreshed) == execution_view(native)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            pass  # No usable fresh cache; the explicit refresh command fetches one.
     issues = []
     if not checks["native_binary_executable"]:
         issues.append(f"native_target missing or not executable: {native_binary}")
@@ -1186,7 +1241,7 @@ def doctor(root: Path = ROOT) -> dict:
     if checks.get("account_catalog_matches_installed") is False:
         issues.append("account model cache differs from installed catalog; refresh native models before updating Jev")
     return {"ok": all(checks.values()), "checks": checks, "issues": issues,
-            "note": "Static and local-process checks only. A native routed turn and built-in tools still need a smoke test after updates."}
+            "note": "Static and local-process checks only. Stale account caches are skipped; run desktop-refresh-models to fetch fresh Desktop metadata. A native routed turn and built-in tools still need a smoke test after updates."}
 
 
 def telemetry_files(root: Path) -> list[Path]:
@@ -1676,9 +1731,15 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
         [x for x in argv if x not in ("--jev-auto", "--jev-shadow", "--jev-off")])
     if selected_alias and mode_flag is None:
         mode_flag = "--jev-shadow" if selected_alias == "jev-shadow" else "--jev-auto"
-    logical_alias = "jev-shadow" if mode_flag == "--jev-shadow" else "jev-auto"
     command, prompt, explicit = _parse_cli(clean)
     config = load_json(root / "config.json")
+    try:
+        codex_config = tomllib.loads(Path(manifest["config_path"]).read_text())
+    except (OSError, ValueError, KeyError):
+        codex_config = {}
+    if mode_flag is None and codex_config.get("model") in ("jev-auto", "jev-shadow"):
+        mode_flag = "--jev-shadow" if codex_config["model"] == "jev-shadow" else "--jev-auto"
+    logical_alias = "jev-shadow" if mode_flag == "--jev-shadow" else "jev-auto"
     try:
         sol = select_sol(native_catalog(cli_catalog_path(root, "native-models.json")))
     except (OSError, ValueError, KeyError):
@@ -1728,6 +1789,10 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
         if model.endswith("-astra") and not astra_allowed:
             model, effort = sol, "high"
         requested_effort = _cli_effort_override(clean)
+        if requested_mode == "shadow" and not requested_effort:
+            global_effort = codex_config.get("model_reasoning_effort")
+            if global_effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+                requested_effort = global_effort
         if requested_effort:
             from core import visible_roles
             roles = visible_roles(router._catalog())
@@ -1830,7 +1895,7 @@ def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "cli-set-native", "cli-refresh-models",
+    commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "desktop-refresh-models", "cli-set-native", "cli-refresh-models",
                 "desktop-enable", "desktop-disable", "desktop-safe"}
     # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
@@ -1854,6 +1919,10 @@ def main() -> None:
                 if len(argv) != 3 or argv[1] != "--native":
                     raise ValueError("usage: jev-codex desktop-refresh-native --native /absolute/path/to/codex")
                 print(json.dumps(desktop_refresh_native(Path(argv[2])), indent=2))
+            elif cmd == "desktop-refresh-models":
+                if len(argv) != 1:
+                    raise ValueError("usage: jev-codex desktop-refresh-models")
+                print(json.dumps(desktop_refresh_catalog(), indent=2))
             elif cmd == "cli-set-native":
                 if len(argv) != 3 or argv[1] != "--native":
                     raise ValueError("usage: jev-codex cli-set-native --native /absolute/path/to/codex")

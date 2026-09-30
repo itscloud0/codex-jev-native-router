@@ -63,6 +63,28 @@ class CostReportTests(unittest.TestCase):
         self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 1)
         self.assertEqual(result["auto"]["unlinked_auto_calls"], 0)
 
+    def test_shadow_cli_exec_native_usage_is_baseline_only_for_exact_turn(self):
+        ts = int(time.time())
+        route = {"event": "route", "ts": ts, "route_id": "a" * 24,
+                 "mode": "shadow", "session": "b" * 24, "client": "cli",
+                 "model": "gpt-6.1-sol", "effort": "high", "turn_hash": "c" * 24,
+                 "proposed_model": "gpt-6-luna", "proposed_effort": "low"}
+        usage = {"event": "usage", "ts": ts, "route_id": route["route_id"],
+                 "mode": "native", "session": route["session"], "client": "cli",
+                 "model": route["model"], "effort": route["effort"],
+                 "turn_hash": route["turn_hash"], "input_tokens": 100,
+                 "cached_input_tokens": 80, "output_tokens": 10}
+        wrong_turn = {**usage, "turn_hash": "d" * 24}
+        wrong_effort = {**usage, "effort": "medium"}
+        result = cost_report([route, usage, wrong_turn, wrong_effort])
+        self.assertEqual(result["shadow"]["route_decisions"], 1)
+        self.assertEqual(result["shadow"]["linked_calls"], 1)
+        self.assertEqual(result["shadow"]["observed_executor"]["tokens"],
+                         {"uncached_input": 20, "cached_input": 80, "output": 10})
+        self.assertEqual(result["auto"]["linked_calls"], 0)
+        self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 0)
+        self.assertIn("Shadow baseline: 1 decisions | 1 linked Sol calls", format_savings(result))
+
     def test_summary_leads_with_all_observed_auto_not_optimistic_linked_subset(self):
         ts = int(time.time())
         route = {"event": "route", "ts": ts, "route_id": "a" * 24,
