@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+import core
 import rpc_adapter
 
 
@@ -173,6 +174,45 @@ class AdapterTests(unittest.TestCase):
         self.adapter.server(response(10, {'thread': {'id': 't', 'model': 'gpt-6-sol'},
                                           'model': 'gpt-6-sol', 'reasoningEffort': 'high'}))
         self.assertNotIn('effort_override', self.adapter.store.get('t'))
+
+    def test_shadow_picker_effort_controls_sol_but_not_jev_and_survives_resume(self):
+        (self.root / 'config.json').write_text(json.dumps({'mode': 'auto', 'shadow_policy': 'completion_v4'}))
+        (self.root / 'catalog.json').write_text(json.dumps({'models': [
+            {'slug': 'gpt-6-luna', 'visibility': 'list', 'supported_in_api': True,
+             'supported_reasoning_levels': [{'effort': x} for x in ('low', 'medium', 'high')]},
+            {'slug': 'gpt-6.1-sol', 'visibility': 'list', 'supported_in_api': True,
+             'supported_reasoning_levels': [{'effort': x} for x in ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')]}]}))
+        bodies = []
+        def jev(body, timeout, key_file):
+            bodies.append(body)
+            return {'answers': {'work_shape': {'choice': 'mechanical'}, 'effort': {'choice': 'low'}}}
+        router = core.Router(self.root / 'config.json', self.root / 'catalog.json',
+                             self.root / 'leases.json', self.root / 'telemetry.jsonl', jev)
+        adapter = rpc_adapter.Adapter(self.root, router=router)
+        started = json.loads(adapter.client(request('thread/start', {'model': 'jev-shadow', 'effort': 'high'}, 30)))
+        self.assertEqual(started['params']['model'], 'gpt-6.1-sol')
+        adapter.server(response(30, {'thread': {'id': 'shadow-thread'}, 'model': 'gpt-6.1-sol',
+                                     'reasoningEffort': 'high'}))
+        first = json.loads(adapter.client(request('turn/start', {'threadId': 'shadow-thread', 'model': 'jev-shadow',
+            'input': [{'type': 'text', 'text': 'Rename a variable'}]}, 31)))
+        self.assertEqual((first['params']['model'], first['params']['effort']), ('gpt-6.1-sol', 'high'))
+        self.assertIn('effort', bodies[-1]['questions'])
+        self.assertNotIn('requested_effort', bodies[-1]['state'])
+        receipt = json.loads((self.root / 'telemetry.jsonl').read_text().splitlines()[-1])
+        self.assertEqual((receipt['model'], receipt['effort'], receipt['proposed_model'], receipt['proposed_effort']),
+                         ('gpt-6.1-sol', 'high', 'gpt-6-luna', 'low'))
+        adapter.server((json.dumps({'method': 'turn/completed', 'params': {
+            'threadId': 'shadow-thread', 'turn': {'id': 'turn-1', 'status': 'completed'}}}) + '\n').encode())
+        adapter.client(request('thread/settings/update', {'threadId': 'shadow-thread', 'model': 'jev-shadow',
+                                                         'effort': 'xhigh'}, 32))
+        self.assertEqual(adapter.store.get('shadow-thread')['effort_override'], 'xhigh')
+        resumed = rpc_adapter.Adapter(self.root, router=router)
+        resumed.client(request('thread/resume', {'threadId': 'shadow-thread', 'model': 'jev-shadow'}, 33))
+        resumed.server(response(33, {'thread': {'id': 'shadow-thread'}, 'model': 'gpt-6.1-sol',
+                                     'reasoningEffort': 'medium'}))
+        second = json.loads(resumed.client(request('turn/start', {'threadId': 'shadow-thread',
+            'input': [{'type': 'text', 'text': 'Rename another variable'}]}, 34)))
+        self.assertEqual((second['params']['model'], second['params']['effort']), ('gpt-6.1-sol', 'xhigh'))
 
     def test_auto_receives_last_concrete_model_for_cache_continuity(self):
         self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'gpt-6-sol',

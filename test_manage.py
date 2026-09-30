@@ -86,20 +86,25 @@ class InstallTests(unittest.TestCase):
                    if item["slug"].startswith("jev-")}
         self.assertEqual(aliases["jev-auto"]["supported_reasoning_levels"], [{"effort": "medium"}])
         self.assertIn("Jev chooses", aliases["jev-auto"]["description"])
-        self.assertEqual(aliases["jev-shadow"]["supported_reasoning_levels"], [{"effort": "medium"}])
+        self.assertEqual([level["effort"] for level in aliases["jev-shadow"]["supported_reasoning_levels"]],
+                         ["low", "medium", "high"])
+        self.assertEqual(aliases["jev-shadow"]["default_reasoning_level"], "medium")
 
     def test_newer_sol_catalog_refresh_uses_newer_alias_metadata(self):
         older = {"slug": "gpt-6-sol", "visibility": "list",
                  "supported_reasoning_levels": [{"effort": "medium"}], "model_messages": {"identity": "old"}}
         newer = {"slug": "gpt-6.1-sol", "visibility": "list",
                  "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}],
-                 "model_messages": {"identity": "new"}}
+                 "default_reasoning_level": "high", "model_messages": {"identity": "new"}}
         catalog = {"models": [older, newer]}
         self.assertEqual(manage.select_sol(catalog), "gpt-6.1-sol")
         aliases = {item["slug"]: item for item in manage.managed_catalog(catalog)["models"]
                    if item["slug"].startswith("jev-")}
         self.assertEqual(aliases["jev-auto"]["model_messages"], newer["model_messages"])
         self.assertEqual(aliases["jev-auto"]["supported_reasoning_levels"], [{"effort": "medium"}])
+        self.assertEqual(aliases["jev-shadow"]["supported_reasoning_levels"],
+                         [{"effort": "medium"}, {"effort": "high"}])
+        self.assertEqual(aliases["jev-shadow"]["default_reasoning_level"], "medium")
 
     def test_enable_migrates_legacy_relay_url_and_preserves_manual_alias(self):
         self.install()
@@ -262,6 +267,7 @@ class InstallTests(unittest.TestCase):
                 recorded = json.loads((self.root / "state/telemetry.jsonl").read_text().splitlines()[-1])
                 self.assertEqual(recorded["route_id"], cli_route_id(token))
                 self.assertEqual(args[3:7], ["-m", "gpt-6-sol", "-c", 'model_reasoning_effort="high"'])
+                self.assertIn("model_catalog_json=" + manage.toml_string(str(manage.cli_catalog_path(self.root, "native-models.json"))), args)
                 self.assertIn("Fix tests", args)
                 self.assertEqual(decide.call_args.kwargs["mode_override"], "auto")
                 self.assertEqual(decide.call_args.kwargs["native_selection"], True)
@@ -270,6 +276,14 @@ class InstallTests(unittest.TestCase):
                 self.assertEqual(args.count("model_reasoning_effort=high"), 1)
                 self.assertIn("gpt-6-sol", args)
                 decide.assert_called_once()
+            with mock.patch.object(core.Router, "decide", return_value={"model": "gpt-6-sol", "effort": "medium",
+                                                                     "proposed_model": "gpt-6-luna", "proposed_effort": "low"}) as decide:
+                args = manage.cli_args(["--jev-shadow", "-c", "model_reasoning_effort=xhigh", "exec", "Fix tests"], self.root)
+                self.assertEqual(args.count("model_reasoning_effort=xhigh"), 1)
+                self.assertEqual(decide.call_args.kwargs["mode_override"], "shadow")
+                self.assertNotIn("requested_effort", decide.call_args.args[0])
+                record = json.loads((self.root / "state/telemetry.jsonl").read_text().splitlines()[-1])
+                self.assertEqual((record["effort"], record["proposed_effort"]), ("xhigh", "low"))
             with mock.patch.object(core.Router, "decide", return_value={"model": "gpt-6-sol", "effort": "low"}) as decide:
                 args = manage.cli_args(["exec", "-m", "jev-auto", "Fix tests"], self.root)
                 self.assertIn("gpt-6-sol", args)
@@ -303,6 +317,16 @@ class InstallTests(unittest.TestCase):
         self.config.write_text('openai_base_url = "http://127.0.0.1:43191/legacy"\n' + self.config.read_text())
         self.assertIn('openai_base_url="https://chatgpt.com/backend-api/codex"',
                       manage.native_args(["exec", "Fix"], self.root))
+
+    def test_cli_route_failure_preserves_native_model_metadata(self):
+        self.install()
+        import core
+        with mock.patch.object(manage, "health", return_value=True), \
+             mock.patch.object(core.Router, "decide", side_effect=TimeoutError("Jev unavailable")):
+            args = manage.cli_args(["exec", "Fix tests"], self.root)
+        self.assertEqual(args[args.index("-m") + 1], "gpt-6-sol")
+        self.assertIn("model_catalog_json=" + manage.toml_string(
+            str(manage.cli_catalog_path(self.root, "native-models.json"))), args)
 
     def test_interactive_cli_keeps_local_auto_alias_and_resume(self):
         self.install()
@@ -413,6 +437,9 @@ class InstallTests(unittest.TestCase):
             self.assertIn(str(manage.cli_catalog_path(self.root, "models.json")),
                           manage.cli_args([], self.root)[4])
             self.assertTrue(manage.doctor(self.root)["checks"]["cli_catalog_matches_latest_sol"])
+        with mock.patch.object(manage, "health", return_value=False):
+            fallback = manage.cli_args(["--jev-shadow", "exec", "Reply OK"], self.root)
+            self.assertEqual(fallback[fallback.index("-m") + 1], "gpt-6.1-sol")
         adapter = rpc_adapter.Adapter(self.root, client="cli",
                                       catalog_path=manage.cli_catalog_path(self.root, "native-models.json"))
         self.assertEqual(adapter.router.catalog_path, manage.cli_catalog_path(self.root, "native-models.json"))

@@ -476,6 +476,8 @@ class Router:
         task, uncertain = sanitize_task(raw) if raw else ("", False)
         turn_hash = _hash(raw) if raw else ""
         base = all_roles.get("sol") or all_roles.get("terra") or all_roles.get("luna")
+        shadow_effort = (_effort(payload.get("shadow_executor_effort"), base)
+                         if mode == "shadow" and base else "medium")
         # Concrete model names are always native, even if routing mode is enabled.
         if native_model not in ALIASES:
             requested = payload.get("reasoning", {})
@@ -485,12 +487,12 @@ class Router:
             fallback = config.get("fallback_model")
             if not isinstance(fallback, str) or not re.fullmatch(r"gpt-\d+(?:\.\d+)*-sol", fallback):
                 fallback = None
-            return self._finalize({"model": fallback, "effort": "medium", "mode": mode, "reason": "catalog_unavailable" if fallback else "cannot_route", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
+            return self._finalize({"model": fallback, "effort": shadow_effort if mode == "shadow" else "medium", "mode": mode, "reason": "catalog_unavailable" if fallback else "cannot_route", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
         if "sol" not in all_roles:
             fallback = config.get("fallback_model")
             if not isinstance(fallback, str) or not re.fullmatch(r"gpt-\d+(?:\.\d+)*-sol", fallback):
                 fallback = None
-            return self._finalize({"model": fallback, "effort": "medium", "mode": mode, "reason": "sol_catalog_unavailable" if fallback else "cannot_route", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
+            return self._finalize({"model": fallback, "effort": shadow_effort if mode == "shadow" else "medium", "mode": mode, "reason": "sol_catalog_unavailable" if fallback else "cannot_route", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
         lock_path = self.state_path.with_suffix(".lock")
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -544,7 +546,7 @@ class Router:
                 decision.pop("downgrade_streak", None)
                 return self._finalize(decision, start, client, payload)
         except Exception:
-            return self._finalize({"model": base["slug"], "effort": _effort("medium", base), "mode": mode, "reason": "state_error", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
+            return self._finalize({"model": base["slug"], "effort": shadow_effort if mode == "shadow" else _effort("medium", base), "mode": mode, "reason": "state_error", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
 
     @staticmethod
     def _finalize(decision: dict, start: float, client: str, payload: dict) -> dict:
@@ -561,7 +563,8 @@ class Router:
         if mode == "off":
             return self._decision(base["slug"], _effort("medium", base), "off", "off", previous, 0, None, None, "sol", 1)
         if same_turn and previous_role in roles and previous == roles[previous_role]["slug"]:
-            return self._decision(previous, lease["effort"], mode, "lease", previous, 0, None, None, previous_role, lease.get("turns", 1))
+            effort = _effort(payload.get("shadow_executor_effort"), base) if mode == "shadow" else lease["effort"]
+            return self._decision(previous, effort, mode, "lease", previous, 0, None, None, previous_role, lease.get("turns", 1))
         # Jev decides whether high-risk work needs Astra when it is allowed.
         floor = "sol" if raw_floor == "astra" else raw_floor if raw_floor in roles else next((role for role in ROLES if role in roles), "sol")
         context = payload.get("context_tokens")
@@ -593,7 +596,9 @@ class Router:
         jev_usage: dict = {}
         receipt: dict = {}
         if task and not uncertain and time.monotonic() >= self._open_until[policy]:
-            fixed_effort = payload.get("requested_effort") if payload.get("requested_effort") in EFFORTS else config.get("fixed_effort") if config.get("effort_policy") == "fixed" else None
+            fixed_effort = (None if mode == "shadow" else payload.get("requested_effort")
+                            if payload.get("requested_effort") in EFFORTS else config.get("fixed_effort")
+                            if config.get("effort_policy") == "fixed" else None)
             dossier_payload = {**payload, "requested_effort": fixed_effort} if fixed_effort in EFFORTS else payload
             body = self._jev_body(task, floor, roles, lease, dossier_payload, policy)
             if raw_floor == "astra":
@@ -712,7 +717,7 @@ class Router:
         proposed_model = roles[proposed_role]["slug"] if policy == "completion_v4" and proposed_role in roles else model["slug"]
         proposed_effort = effort
         if mode == "shadow":
-            decision = self._decision(base["slug"], _effort("medium", base), mode, "shadow_" + reason, previous, jev_ms, proposed_model, proposed_effort, "sol", turns)
+            decision = self._decision(base["slug"], _effort(payload.get("shadow_executor_effort"), base), mode, "shadow_" + reason, previous, jev_ms, proposed_model, proposed_effort, "sol", turns)
             return {**decision, **receipt, **jev_usage, "downgrade_role": downgrade_role, "downgrade_streak": downgrade_streak}
         if not native_selection and model["slug"] != base["slug"] and not proxy_compatible(model, base):
             decision = self._decision(base["slug"], _effort("medium", base), mode, "requires_native_model_selection", previous, jev_ms, proposed_model, proposed_effort, "sol", turns)

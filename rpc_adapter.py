@@ -54,6 +54,18 @@ def _alias(model: Any) -> str | None:
     return model if isinstance(model, str) and model in ALIASES else None
 
 
+def _shadow_effort(params: dict, saved: dict | None = None) -> str | None:
+    settings = params.get("collaborationMode", {}).get("settings") if isinstance(params.get("collaborationMode"), dict) else None
+    config = params.get("config") if isinstance(params.get("config"), dict) else None
+    for value in (params.get("effort"),
+                  settings.get("reasoning_effort") if isinstance(settings, dict) else None,
+                  config.get("model_reasoning_effort") if isinstance(config, dict) else None,
+                  (saved or {}).get("effort_override")):
+        if value in ("low", "medium", "high", "xhigh", "max", "ultra"):
+            return value
+    return None
+
+
 def _custom_provider(params: dict) -> bool:
     config = params.get("config")
     if not isinstance(config, dict):
@@ -210,6 +222,10 @@ class Adapter:
         if saved and saved.get("failed"):
             text = "Previous turn failure. " + text
         payload = {"model": alias, "input": [{"role": "user", "content": [{"type": "input_text", "text": text}]}]}
+        if alias == "jev-shadow":
+            selected_effort = _shadow_effort(params, saved)
+            if selected_effort:
+                payload["shadow_executor_effort"] = selected_effort
         current = self.actual.get(thread_id)
         if current and isinstance(current[0], str):
             payload["current_model"] = current[0]
@@ -237,7 +253,7 @@ class Adapter:
                                  and "astra" in configured_roles)
                 if model.endswith("-astra") and not astra_allowed:
                     model, effort = self._sol(), "high"
-                if saved and saved.get("conservative") and context is None:
+                if alias == "jev-auto" and saved and saved.get("conservative") and context is None:
                     previous = saved.get("actual")
                     if model.endswith(("-luna", "-terra")) or (isinstance(previous, str) and previous.endswith("-astra")):
                         model, effort = self._sol(), "medium"
@@ -252,9 +268,10 @@ class Adapter:
         previous = self.actual.get(thread_id)
         if not previous and saved and isinstance(saved.get("actual"), str):
             previous = (saved["actual"], saved.get("effort") or "medium")
+        fallback_effort = _shadow_effort(params, saved) if alias == "jev-shadow" else None
         if previous and previous[0].endswith("-sol"):
-            return previous[0], "medium", None
-        return self._sol(), "medium", None
+            return previous[0], fallback_effort or "medium", None
+        return self._sol(), fallback_effort or "medium", None
 
     def _enabled(self) -> bool:
         try:
@@ -334,6 +351,8 @@ class Adapter:
         if not self._enabled() and alias:
             previous = self.actual.get(thread_id) if thread_id else None
             model, effort = previous or ((saved or {}).get("actual") or self._sol(), (saved or {}).get("effort") or "medium")
+            if alias == "jev-shadow":
+                effort = _shadow_effort(params, saved) or effort
             changed = copy.deepcopy(message)
             changed["params"]["model"] = model
             if method == "turn/start":
@@ -371,7 +390,9 @@ class Adapter:
             self._remember(self.actual, thread_id, (model, effort))
             self.active.add(thread_id)
             self.store.update(thread_id, alias=alias, failed=False, actual=model, effort=effort,
-                              conservative=False, clear_effort_override=True)
+                              conservative=False,
+                              effort_override=_shadow_effort(params, saved) if alias == "jev-shadow" else None,
+                              clear_effort_override=alias != "jev-shadow")
             if rid and len(self.pending) < MAX_PENDING:
                 self.pending[rid] = {"method": method, "thread": thread_id, "alias": alias}
             return _encode(changed)
@@ -398,12 +419,14 @@ class Adapter:
             else:
                 changed["params"]["collaborationMode"]["settings"].pop("model", None)
         if rid and len(self.pending) < MAX_PENDING:
-            self.pending[rid] = {"method": method, "thread": thread_id, "alias": alias}
+            self.pending[rid] = {"method": method, "thread": thread_id, "alias": alias,
+                                 "shadow_effort": _shadow_effort(params, saved) if alias == "jev-shadow" else None}
         if thread_id and method == "thread/settings/update":
-            requested = params.get("effort")
+            requested = _shadow_effort(params, saved) if alias == "jev-shadow" else params.get("effort")
             self.store.update(thread_id, alias=alias, actual=initial,
                               effort=requested if isinstance(requested, str) else None,
-                              clear_effort_override=True)
+                              effort_override=requested if alias == "jev-shadow" else None,
+                              clear_effort_override=alias != "jev-shadow")
         return _encode(changed)
 
     def server(self, raw: bytes) -> bytes:
@@ -510,7 +533,8 @@ class Adapter:
             conservative = pending["method"] == "thread/resume" and not isinstance((existing or {}).get("context"), int)
             self.store.update(new_thread, alias=alias, actual=actual,
                               effort=result.get("reasoningEffort"), conservative=conservative,
-                              clear_effort_override=True)
+                              effort_override=pending.get("shadow_effort") if alias == "jev-shadow" else None,
+                              clear_effort_override=alias != "jev-shadow")
             if self.initial_alias and pending["method"] == "thread/resume":
                 self.resume_pending.add(new_thread)
         if alias and pending["method"] in ("thread/start", "thread/resume", "thread/fork") and isinstance(result.get("model"), str):

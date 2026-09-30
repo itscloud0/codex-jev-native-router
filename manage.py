@@ -151,19 +151,20 @@ def managed_catalog(native: dict) -> dict:
         alias["description"] = ("Jev chooses the execution model and reasoning effort; "
                                 "the displayed effort is not the execution effort."
                                 if slug == "jev-auto" else
-                                "Runs Sol/medium while recording Jev's proposed model and effort.")
-        # The alias is a selector, not an executor. Advertising Sol's whole
-        # effort ladder offers controls that Auto deliberately ignores.
-        advertised = [
-            level for level in sol.get("supported_reasoning_levels", [])
-            if isinstance(level, dict) and level.get("effort") == "medium"
-        ]
+                                "Runs the latest available Sol at the selected effort; "
+                                "Jev independently proposes a model and effort.")
+        # Auto ignores the visible effort; Shadow applies it to Sol only.
+        advertised = [level for level in sol.get("supported_reasoning_levels", [])
+                      if isinstance(level, dict) and level.get("effort") == "medium"] if slug == "jev-auto" else [
+                          level for level in sol.get("supported_reasoning_levels", [])
+                          if isinstance(level, dict) and level.get("effort") in ("low", "medium", "high", "xhigh", "max", "ultra")]
         if not advertised:
             advertised = [level for level in sol.get("supported_reasoning_levels", [])
                           if isinstance(level, dict) and isinstance(level.get("effort"), str)][:1]
         if not advertised:
             raise ValueError("Sol has no supported reasoning levels")
-        alias["default_reasoning_level"] = advertised[0]["effort"]
+        alias["default_reasoning_level"] = ("medium" if any(level["effort"] == "medium" for level in advertised)
+                                            else advertised[0]["effort"])
         alias["supported_reasoning_levels"] = advertised
         models.append(alias)
     return {"models": models}
@@ -1089,6 +1090,7 @@ def status(root: Path = ROOT) -> dict:
         "launch_agent_present": Path(desktop.get("agent_path", DESKTOP_AGENT)).exists(),
         "auto_routing_active": (bool(desktop.get("enabled")) and runtime["adapter_active"]
                                 and manifest["config_state"] == "enabled" and config.get("mode") != "off"),
+        "shadow_executor_model": available["sol"]["slug"] if "sol" in available else None,
         "limitation": "Desktop hostConfig.codex_cli_command overrides CODEX_CLI_PATH when set",
         "runtime": runtime,
     }
@@ -1625,6 +1627,10 @@ def _cli_alias_catalog_args(root: Path) -> list[str]:
     return ["-c", "model_catalog_json=" + toml_string(str(cli_catalog_path(root, "models.json")))]
 
 
+def _cli_native_catalog_args(root: Path) -> list[str]:
+    return ["-c", "model_catalog_json=" + toml_string(str(cli_catalog_path(root, "native-models.json")))]
+
+
 def _cli_effort_override(argv: list[str]) -> str | None:
     for index, arg in enumerate(argv):
         value = argv[index + 1] if arg in ("-c", "--config") and index + 1 < len(argv) else arg.partition("=")[2] if arg.startswith("--config=") else ""
@@ -1673,7 +1679,10 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
     logical_alias = "jev-shadow" if mode_flag == "--jev-shadow" else "jev-auto"
     command, prompt, explicit = _parse_cli(clean)
     config = load_json(root / "config.json")
-    sol = config.get("fallback_model", SOL)
+    try:
+        sol = select_sol(native_catalog(cli_catalog_path(root, "native-models.json")))
+    except (OSError, ValueError, KeyError):
+        sol = config.get("fallback_model", SOL)
     if mode_flag == "--jev-off":
         return [native if _custom_transport(clean) else bypass, *clean]
     if _custom_transport(clean):
@@ -1733,9 +1742,10 @@ def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list
         extras = ["-m", model]
         if effort and not requested_effort:
             extras.extend(["-c", "model_reasoning_effort=" + toml_string(effort)])
-        return [native, *_cli_endpoint_args(root, config, route_token), *extras, *clean]
+        return [native, *_cli_endpoint_args(root, config, route_token), *extras,
+                *_cli_native_catalog_args(root), *clean]
     except Exception:
-        return [native, *endpoint, "-m", sol, *clean]
+        return [native, *endpoint, "-m", sol, *_cli_native_catalog_args(root), *clean]
 
 
 def native_overrides(root: Path) -> list[str]:

@@ -178,6 +178,40 @@ class RouterTest(unittest.TestCase):
                                  native_selection=True, session_id="alias-off", mode_override="auto")
         self.assertEqual((off["mode"], off["reason"]), ("off", "off"))
 
+    def test_shadow_uses_selected_sol_effort_without_constraining_jev(self):
+        models = catalog()
+        sol = next(item for item in models["models"] if item["slug"] == "gpt-6-sol")
+        sol["slug"] = "gpt-6.1-sol"
+        sol["supported_reasoning_levels"] = [{"effort": x} for x in ("low", "medium", "high", "xhigh", "max", "ultra")]
+        (self.root / "catalog.json").write_text(json.dumps(models))
+        (self.root / "config.json").write_text(json.dumps({"mode": "auto", "shadow_policy": "completion_v4",
+                                                           "effort_policy": "fixed", "fixed_effort": "high"}))
+        def jev(body, timeout, key_file):
+            self.calls.append(body)
+            self.assertIn("effort", body["questions"])
+            self.assertNotIn("requested_effort", body["state"])
+            return {"answers": {"work_shape": {"choice": "mechanical"}, "effort": {"choice": "low"}}}
+        router = self.new_router(jev)
+        first = payload("Rename a local variable", "jev-shadow")
+        first["shadow_executor_effort"] = "xhigh"
+        shadow = router.decide(first, native_selection=True, session_id="shadow-independent")
+        self.assertEqual((shadow["model"], shadow["effort"]), ("gpt-6.1-sol", "xhigh"))
+        self.assertEqual((shadow["proposed_model"], shadow["proposed_effort"]), ("gpt-6-luna", "low"))
+        same_turn = dict(first, shadow_executor_effort="medium")
+        changed = router.decide(same_turn, native_selection=True, session_id="shadow-independent")
+        self.assertEqual((changed["model"], changed["effort"]), ("gpt-6.1-sol", "medium"))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_shadow_preserves_selected_effort_when_jev_fails(self):
+        def unavailable(*args):
+            raise OSError("unavailable")
+        router = self.new_router(unavailable)
+        request = payload("Fix a parser bug", "jev-shadow")
+        request["shadow_executor_effort"] = "high"
+        decision = router.decide(request, native_selection=True, session_id="shadow-fallback")
+        self.assertEqual((decision["model"], decision["effort"]), ("gpt-6-sol", "high"))
+        self.assertEqual(decision["reason"], "shadow_jev_error")
+
     def test_dominated_terra_is_skipped_unless_explicitly_enabled(self):
         models = catalog()
         terra = next(item for item in models["models"] if item["slug"] == "gpt-6-terra")
