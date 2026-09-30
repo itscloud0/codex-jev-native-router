@@ -332,6 +332,9 @@ class InstallTests(unittest.TestCase):
         self.install()
         self.config.write_text(self.config.read_text().replace('model = "gpt-6-astra"',
                                                         'model = "jev-shadow"\nmodel_reasoning_effort = "high"'))
+        with mock.patch.object(manage, "health", return_value=True):
+            self.assertEqual(manage.status(self.root)["codex_default"],
+                             {"model": "jev-shadow", "effort": "high", "routing": "shadow"})
         import core
         decision = {"model": "gpt-6-sol", "effort": "medium", "mode": "shadow",
                     "proposed_model": "gpt-6-luna", "proposed_effort": "low"}

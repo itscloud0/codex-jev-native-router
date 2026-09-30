@@ -1090,6 +1090,19 @@ def desktop_runtime(native_target: Path | None = None) -> dict:
 def status(root: Path = ROOT) -> dict:
     manifest = load_json(root / "manifest.json")
     config = load_json(root / "config.json")
+    try:
+        codex_config = tomllib.loads(Path(manifest["config_path"]).read_text())
+    except (OSError, ValueError, KeyError):
+        codex_config = {}
+    default_model = codex_config.get("model")
+    if not isinstance(default_model, str) or not re.fullmatch(r"(?:jev-(?:auto|shadow)|gpt-\d+(?:\.\d+)*(?:-[a-z][a-z0-9]*)?)", default_model):
+        default_model = None
+    default_effort = codex_config.get("model_reasoning_effort")
+    if default_effort not in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        default_effort = None
+    default_mode = ("off" if manifest["config_state"] != "enabled" or config.get("mode") == "off" else
+                    "shadow" if default_model == "jev-shadow" else
+                    "auto" if default_model == "jev-auto" else "native")
     auto_roles = config.get("auto_roles")
     if not (isinstance(auto_roles, list) and "sol" in auto_roles and
             all(isinstance(role, str) and role in ("luna", "terra", "sol", "astra") for role in auto_roles)):
@@ -1147,6 +1160,7 @@ def status(root: Path = ROOT) -> dict:
     }
     return {
         "mode": config["mode"], "config_state": manifest["config_state"], "health": health(root),
+        "codex_default": {"model": default_model, "effort": default_effort, "routing": default_mode},
         "policy": {"config_file": str(root / "config.json"), "auto_roles": auto_roles,
                    "effective_auto_roles": list(effective_roles),
                    "allow_dominated_roles": config.get("allow_dominated_roles") is True,
