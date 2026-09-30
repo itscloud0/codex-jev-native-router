@@ -13,6 +13,20 @@ import rpc_adapter
 
 
 class ConfigSurgeryTests(unittest.TestCase):
+    def test_picker_brand_keeps_alias_ids_and_recognizes_only_exact_legacy(self):
+        native = {"models": [{"slug": "gpt-6.1-sol", "display_name": "Sol", "visibility": "list",
+                              "supported_reasoning_levels": [{"effort": "medium"}]}]}
+        catalog = manage.managed_catalog(native)
+        aliases = {m["slug"]: m["display_name"] for m in catalog["models"] if m["slug"].startswith("jev-")}
+        self.assertEqual(aliases, {"jev-auto": "Effortlane Auto", "jev-shadow": "Effortlane Shadow"})
+        self.assertTrue(manage.is_managed_catalog(catalog, native))
+        for model in catalog["models"]:
+            if model["slug"] in aliases:
+                model["display_name"] = "Jev Auto" if model["slug"] == "jev-auto" else "Jev Shadow"
+        self.assertTrue(manage.is_managed_catalog(catalog, native))
+        catalog["models"][-1]["description"] = "user modification"
+        self.assertFalse(manage.is_managed_catalog(catalog, native))
+
     def test_round_trip_preserves_unrelated_changes(self):
         original = 'model = "gpt-6-astra"\n# comment\n[features]\nsearch = true\n'
         before = {key: manage.root_fields(original).get(key) for key in manage.MANAGED_KEYS}

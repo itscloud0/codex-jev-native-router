@@ -42,12 +42,14 @@ The installer asks for the Jev key with hidden input, backs up existing Codex co
 
 Already installed? See [update and recovery](docs/OPERATIONS.md#report). Renaming this GitHub repository does not change your local `jev-codex` command or installation directory.
 
+The picker displays **Effortlane Auto / Effortlane Shadow**. Internal IDs (`jev-auto`, `jev-shadow`) and `--jev-auto` / `--jev-shadow` flags remain compatible with existing sessions and scripts.
+
 ### Pick how much control to give Jev
 
 | Selection | Actual executor | Model and effort decision |
 |---|---|---|
-| **Jev Auto** | An allowed native Codex model | Jev proposes both; local policy validates the decision |
-| **Jev Shadow** | Latest Sol exposed by that client | Your selected effort executes; Jev independently records a proposal |
+| **Effortlane Auto** | An allowed native Codex model | Jev proposes both; local policy validates the decision |
+| **Effortlane Shadow** | Latest Sol exposed by that client | Your selected effort executes; Jev independently records a proposal |
 | **Concrete model** | Your selected model | Manual model choice bypasses automatic routing |
 
 ```sh

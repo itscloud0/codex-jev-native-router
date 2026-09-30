@@ -142,7 +142,7 @@ def select_sol(catalog: dict) -> str:
 def managed_catalog(native: dict) -> dict:
     models = copy.deepcopy(native["models"])
     sol = next(x for x in models if x.get("slug") == select_sol(native))
-    for slug, name in (("jev-auto", "Jev Auto"), ("jev-shadow", "Jev Shadow")):
+    for slug, name in (("jev-auto", "Effortlane Auto"), ("jev-shadow", "Effortlane Shadow")):
         if any(x.get("slug") == slug for x in models):
             raise ValueError("native catalog already owns " + slug)
         alias = copy.deepcopy(sol)
@@ -168,6 +168,19 @@ def managed_catalog(native: dict) -> dict:
         alias["supported_reasoning_levels"] = advertised
         models.append(alias)
     return {"models": models}
+
+
+
+def is_managed_catalog(current: dict, native: dict) -> bool:
+    """Recognize exact generated catalogs, including the former picker labels."""
+    expected = managed_catalog(native)
+    if current == expected:
+        return True
+    legacy = copy.deepcopy(expected)
+    for model in legacy["models"]:
+        if model.get("slug") in ("jev-auto", "jev-shadow"):
+            model["display_name"] = "Jev Auto" if model["slug"] == "jev-auto" else "Jev Shadow"
+    return current == legacy
 
 
 def plist_content(root: Path, python: Path) -> bytes:
@@ -453,7 +466,7 @@ def desktop_refresh_catalog(root: Path = ROOT) -> dict:
     native_path, managed_path = root / "native-models.json", root / "models.json"
     previous_native, previous_managed = native_path.read_bytes(), managed_path.read_bytes()
     current_native = native_catalog(native_path)
-    if load_json(managed_path) != managed_catalog(current_native):
+    if not is_managed_catalog(load_json(managed_path), current_native):
         raise ValueError("Desktop model catalog was modified; refusing to overwrite it")
     auth = Path(manifest["config_path"]).parent / "auth.json"
     native = fetch_account_catalog(binary, auth)
