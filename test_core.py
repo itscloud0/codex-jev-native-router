@@ -866,6 +866,33 @@ class RouterTest(unittest.TestCase):
         self.assertIsNone(line["context_tokens"])
         self.assertIn("router_ms", line)
 
+    def test_subscription_metadata_is_allowlisted_and_invalid_windows_omitted(self):
+        self.router.record_subscription({"limitId": "private-key-value", "planType": "pro",
+            "limitName": "private account", "credits": {"balance": "private billing"},
+            "primary": {"usedPercent": 12, "windowDurationMins": 10080, "resetsAt": 1900000000},
+            "secondary": {"usedPercent": float("nan")}}, "desktop")
+        row = json.loads((self.root / "telemetry.jsonl").read_text())
+        self.assertEqual(row["event"], "subscription")
+        self.assertEqual(row["primary"]["used_percent"], 12)
+        self.assertIsNone(row["secondary"])
+        self.assertRegex(row["limit_id"], r"^quota-[a-f0-9]{24}$")
+        self.assertNotIn("private", json.dumps(row))
+        self.router.record_subscription({"primary": {"usedPercent": True}}, "desktop")
+        self.assertEqual(len((self.root / "telemetry.jsonl").read_text().splitlines()), 1)
+
+    def test_optional_metrics_keep_missing_distinct_from_zero(self):
+        self.router.record_usage({"tool_calls": 0, "compactions": True,
+            "turn_duration_ms": 1234, "first_response_ms": -1, "usage_scope": "last_model_call"},
+            {"input_tokens": 100, "output_tokens": 20,
+             "output_tokens_details": {"reasoning_tokens": 7}}, "ok")
+        row = json.loads((self.root / "telemetry.jsonl").read_text())
+        self.assertEqual(row["reasoning_output_tokens"], 7)
+        self.assertEqual(row["tool_calls"], 0)
+        self.assertIsNone(row["compactions"])
+        self.assertIsNone(row["first_response_ms"])
+        self.assertEqual(row["turn_duration_ms"], 1234)
+        self.assertEqual(row["usage_scope"], "last_model_call")
+
     def test_catalog_visibility_and_telemetry_allowlist(self):
         roles = visible_roles(catalog())
         self.assertEqual(set(roles), {"luna", "terra", "sol", "astra"})

@@ -181,6 +181,9 @@ class Adapter:
         self.turn_routes: dict[str, str] = {}
         self.turn_signals: dict[str, dict] = {}
         self.pending_override: dict[str, bool] = {}
+        self.turn_started: dict[str, float] = {}
+        self.first_response: dict[str, int] = {}
+        self.last_subscription: str | None = None
 
     @staticmethod
     def _remember(mapping: dict, key: str, value: Any) -> None:
@@ -363,6 +366,9 @@ class Adapter:
                     changed["params"]["collaborationMode"]["settings"]["reasoning_effort"] = effort
             return _encode(changed)
         if method == "turn/start":
+            if thread_id and thread_id not in self.active:
+                self._remember(self.turn_started, thread_id, time.monotonic())
+                self.first_response.pop(thread_id, None)
             if not thread_id or not alias:
                 if thread_id and manual_override:
                     self._remember(self.turn_signals, thread_id,
@@ -437,6 +443,27 @@ class Adapter:
         params = message.get("params")
         if isinstance(method, str) and isinstance(params, dict):
             thread_id = params.get("threadId")
+            if method == "account/rateLimits/updated" and isinstance(params.get("rateLimits"), dict):
+                # Compare just the bounded snapshot in memory; never persist it raw.
+                snapshot = params["rateLimits"]
+                marker = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+                if marker != self.last_subscription:
+                    self.router.record_subscription(snapshot, self.client_name)
+                    self.last_subscription = marker
+            if isinstance(thread_id, str) and thread_id in self.turn_started:
+                if method == "item/agentMessage/delta" and thread_id not in self.first_response:
+                    self._remember(self.first_response, thread_id,
+                                   max(0, int((time.monotonic() - self.turn_started[thread_id]) * 1000)))
+                if method == "item/started":
+                    item = params.get("item")
+                    if isinstance(item, dict) and item.get("type") in (
+                            "commandExecution", "mcpToolCall", "dynamicToolCall", "webSearch",
+                            "imageGeneration", "fileChange", "collabAgentToolCall"):
+                        signals = self.turn_signals.setdefault(thread_id, {})
+                        signals["tool_calls"] = min(1_000_000, signals.get("tool_calls", 0) + 1)
+                if method == "thread/compacted":
+                    signals = self.turn_signals.setdefault(thread_id, {})
+                    signals["compactions"] = min(1_000_000, signals.get("compactions", 0) + 1)
             if method == "item/completed" and isinstance(thread_id, str) and thread_id in self.active:
                 item = params.get("item")
                 if isinstance(item, dict) and item.get("type") == "commandExecution":
@@ -467,6 +494,7 @@ class Adapter:
                         self._remember(self.turn_usage, (thread_id, turn_id), {
                             "input_tokens": input_tokens, "output_tokens": output_tokens,
                             "input_tokens_details": {"cached_tokens": cached},
+                            "output_tokens_details": {"reasoning_tokens": last.get("reasoningOutputTokens")},
                         })
             elif method == "turn/completed" and isinstance(thread_id, str):
                 self.active.discard(thread_id)
@@ -485,7 +513,14 @@ class Adapter:
                             "shadow" if saved.get("alias") == "jev-shadow" else "native",
                             "reason": "concrete_model" if not saved.get("alias") else "lease"}
                 decision["route_id"] = self.turn_routes.pop(thread_id, "")
-                decision.update(self.turn_signals.pop(thread_id, {}))
+                signals = self.turn_signals.pop(thread_id, {})
+                decision.update(signals)
+                start = self.turn_started.pop(thread_id, None)
+                decision["usage_scope"] = "last_model_call"
+                decision["turn_duration_ms"] = max(0, int((time.monotonic() - start) * 1000)) if start is not None else None
+                decision["first_response_ms"] = self.first_response.pop(thread_id, None)
+                decision["tool_calls"] = signals.get("tool_calls", 0) if start is not None else None
+                decision["compactions"] = signals.get("compactions", 0) if start is not None else None
                 status = "error" if failed else "cancelled" if isinstance(turn, dict) and turn.get("status") == "interrupted" else "ok"
                 self.router.record_usage(decision, usage, status)
             elif method == "thread/settings/updated" and isinstance(thread_id, str):

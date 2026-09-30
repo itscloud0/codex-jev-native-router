@@ -18,6 +18,7 @@ class Router:
     def __init__(self):
         self.calls = []
         self.usage_records = []
+        self.subscription_records = []
         self.mode = 'auto'
         self.model = 'gpt-6-luna'
 
@@ -30,6 +31,9 @@ class Router:
     def decide(self, payload, **kwargs):
         self.calls.append((payload, kwargs))
         return {'model': self.model, 'effort': 'low', 'mode': 'auto', 'reason': 'jev'}
+
+    def record_subscription(self, *args):
+        self.subscription_records.append(args)
 
     def record_usage(self, *args, **kwargs):
         self.usage_records.append((args, kwargs))
@@ -78,6 +82,36 @@ class AdapterTests(unittest.TestCase):
         turn = json.loads(self.adapter.client(request('turn/start', {'threadId': 'picker',
             'model': 'jev-auto', 'input': [{'type': 'text', 'text': 'Fix typo'}]}, 3)))
         self.assertEqual((turn['params']['model'], turn['params']['effort']), ('gpt-6-luna', 'low'))
+
+    def test_subscription_notifications_pass_through_and_deduplicate(self):
+        raw = (json.dumps({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+            "planType": "pro", "primary": {"usedPercent": 12, "windowDurationMins": 10080, "resetsAt": 1900000000}}}}) + "\n").encode()
+        self.assertEqual(self.adapter.server(raw), raw)
+        self.assertEqual(self.adapter.server(raw), raw)
+        self.assertEqual(len(self.router.subscription_records), 1)
+
+    def test_turn_metrics_do_not_capture_tool_content_or_count_steering_twice(self):
+        with mock.patch.object(rpc_adapter.time, "monotonic", return_value=10):
+            self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-shadow',
+                'input': [{'type': 'text', 'text': 'Explain the module'}]}))
+        with mock.patch.object(rpc_adapter.time, "monotonic", return_value=11):
+            self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-shadow',
+                'input': [{'type': 'text', 'text': 'Steering'}]}))
+            raw = (json.dumps({'method': 'item/agentMessage/delta', 'params': {'threadId': 't', 'delta': 'private'}})+'\n').encode()
+            self.assertEqual(self.adapter.server(raw), raw)
+            self.adapter.server((json.dumps({'method': 'item/started', 'params': {'threadId': 't',
+                'item': {'type': 'commandExecution', 'command': 'private command'}}})+'\n').encode())
+            self.adapter.server((json.dumps({'method': 'thread/compacted', 'params': {'threadId': 't'}})+'\n').encode())
+        with mock.patch.object(rpc_adapter.time, "monotonic", return_value=12):
+            self.adapter.server((json.dumps({'method': 'turn/completed', 'params': {'threadId': 't',
+                'turn': {'id': 'turn-1', 'status': 'completed'}}})+'\n').encode())
+        decision = self.router.usage_records[-1][0][0]
+        self.assertEqual(decision['turn_duration_ms'], 2000)
+        self.assertEqual(decision['first_response_ms'], 1000)
+        self.assertEqual(decision['tool_calls'], 1)
+        self.assertEqual(decision['compactions'], 1)
+        self.assertEqual(decision['usage_scope'], 'last_model_call')
+        self.assertNotIn('private', json.dumps(decision))
 
     def test_passthrough(self):
         for raw in (b'{ "jsonrpc":"2.0", "method":"other", "params":{"secret":"x"} }\n',

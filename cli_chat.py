@@ -202,15 +202,16 @@ class CodexClient:
 
 
 def run(argv: list[str], root: Path) -> int:
-    parser = argparse.ArgumentParser(prog="jev-codex chat")
+    parser = argparse.ArgumentParser(prog="effortlane chat")
     previous = parser.add_mutually_exclusive_group()
     previous.add_argument("--resume", metavar="THREAD_UUID")
     previous.add_argument("--last", action="store_true", help="resume the most recently updated thread in this directory")
     parser.add_argument("--model", default="jev-auto")
     parser.add_argument("--once", action="store_true", help="read one prompt from stdin, then exit")
-    args = parser.parse_args(argv)
+    from manage import brand_cli_args
+    args = parser.parse_args(brand_cli_args(argv))
     if not MODELS.fullmatch(args.model):
-        parser.error("model must be jev-auto, jev-shadow, or a concrete GPT model")
+        parser.error("model must be effortlane-auto, effortlane-shadow, or a concrete GPT model")
     if args.resume and not THREADS.fullmatch(args.resume):
         parser.error("--resume requires a thread UUID")
     client = CodexClient(root, args.model)
@@ -221,14 +222,15 @@ def run(argv: list[str], root: Path) -> int:
             if args.once:
                 prompt = sys.stdin.read(20_001)
             else:
-                prompt = input("jev> ")
+                prompt = input("effortlane> ")
             if not prompt or prompt.strip() == "/exit":
                 break
             if not args.once and prompt.startswith("/model "):
                 model = prompt.removeprefix("/model ").strip()
+                model = {"effortlane-auto": "jev-auto", "effortlane-shadow": "jev-shadow"}.get(model, model)
                 if MODELS.fullmatch(model):
                     client.model = model
-                    print(f"model {model}", file=sys.stderr)
+                    print("model " + {"jev-auto": "effortlane-auto", "jev-shadow": "effortlane-shadow"}.get(model, model), file=sys.stderr)
                 else:
                     print("invalid model", file=sys.stderr)
                 continue

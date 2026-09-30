@@ -7,4 +7,4 @@ issue containing only a non-sensitive summary and request a private channel.
 
 The router is a local experiment that handles authenticated Codex traffic.
 Review the source and use an owner-only TypeSafe key file before installing.
-Use `jev-codex disable` or `jev-codex rollback` if routing behaves unexpectedly.
+Use `effortlane disable` or `effortlane rollback` if routing behaves unexpectedly.

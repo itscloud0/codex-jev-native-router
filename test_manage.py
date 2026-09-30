@@ -13,6 +13,13 @@ import rpc_adapter
 
 
 class ConfigSurgeryTests(unittest.TestCase):
+    def test_brand_flags_and_model_values_preserve_prompts(self):
+        self.assertEqual(manage.brand_cli_args(["--effortlane-shadow", "-m", "effortlane-auto",
+                                              "exec", "mention effortlane-shadow"]),
+                         ["--jev-shadow", "-m", "jev-auto", "exec", "mention effortlane-shadow"])
+        self.assertEqual(manage.brand_cli_args(["--model=effortlane-shadow", "--effortlane-off"]),
+                         ["--model=jev-shadow", "--jev-off"])
+
     def test_picker_brand_keeps_alias_ids_and_recognizes_only_exact_legacy(self):
         native = {"models": [{"slug": "gpt-6.1-sol", "display_name": "Sol", "visibility": "list",
                               "supported_reasoning_levels": [{"effort": "medium"}]}]}
@@ -68,8 +75,16 @@ class InstallTests(unittest.TestCase):
     def install(self):
         manage.install(self.root, self.config, self.bin, self.cache, self.agent, start=False, key_path=self.key)
 
+    def test_install_refuses_foreign_brand_command(self):
+        command = self.bin / "effortlane"
+        command.symlink_to(self.bin / "missing-foreign")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.install()
+        self.assertEqual(os.readlink(command), str(self.bin / "missing-foreign"))
+
     def test_install_disable_enable_rollback(self):
         self.install()
+        self.assertEqual(os.readlink(self.bin / "effortlane"), str(self.root / "jev-codex"))
         self.assertEqual(os.readlink(self.codex), str(self.root / "jev-codex"))
         self.assertEqual(os.readlink(self.bin / "codex-native"), str(self.root / "codex-native"))
         self.assertEqual((self.root / "config.json").stat().st_mode & 0o777, 0o600)
@@ -88,9 +103,18 @@ class InstallTests(unittest.TestCase):
         manage.enable(self.root, start=False)
         self.config.write_text(self.config.read_text().replace("search = true", "search = false"))
         manage.rollback(self.root, stop=False)
+        self.assertFalse((self.bin / "effortlane").is_symlink())
         self.assertEqual(os.readlink(self.codex), str(self.real))
         self.assertIn("search = false", self.config.read_text())
         self.assertNotIn("openai_base_url", self.config.read_text())
+
+    def test_rollback_preserves_foreign_brand_command(self):
+        self.install()
+        command = self.bin / "effortlane"
+        command.unlink()
+        command.symlink_to(self.bin / "foreign")
+        manage.rollback(self.root, stop=False)
+        self.assertEqual(os.readlink(command), str(self.bin / "foreign"))
 
     def test_alias_advertises_one_effort_and_explains_auto(self):
         native = {"models": [{"slug": "gpt-6-sol", "display_name": "Sol", "visibility": "list",

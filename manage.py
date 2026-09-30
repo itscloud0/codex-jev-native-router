@@ -524,11 +524,11 @@ def cli_update_and_refresh(root: Path = ROOT) -> int:
         return result.returncode
     try:
         refreshed = cli_refresh_catalog(root=root)
-        print("Jev CLI catalog: " + ("updated" if refreshed["changed"] else "already current")
+        print("Effortlane CLI catalog: " + ("updated" if refreshed["changed"] else "already current")
               + " (Sol " + refreshed["sol"] + ")")
     except (OSError, ValueError, RuntimeError):
-        print("Jev CLI catalog refresh failed; native Codex remains usable. "
-              "Retry with jev-codex cli-refresh-models.", file=sys.stderr)
+        print("Effortlane CLI catalog refresh failed; native Codex remains usable. "
+              "Retry with effortlane cli-refresh-models.", file=sys.stderr)
     return 0
 
 
@@ -565,8 +565,9 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     native_target = execution_binary or (Path(original_link) if os.path.isabs(original_link) else codex.parent / original_link)
     if not native_target.resolve(strict=True).is_file() or not os.access(native_target, os.X_OK):
         raise ValueError("native codex is not executable")
-    if (bin_dir / "codex-native").exists() or (bin_dir / "jev-codex").exists():
-        raise ValueError("codex-native or jev-codex already exists")
+    if any((bin_dir / name).exists() or (bin_dir / name).is_symlink()
+           for name in ("codex-native", "jev-codex", "effortlane")):
+        raise ValueError("codex-native, effortlane, or legacy command already exists")
     if not config_path.exists():
         raise ValueError("Codex config missing")
     key_file = key_path or Path.home() / ".config/jev-codex-router/typesafe-api-key"
@@ -574,7 +575,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         raise ValueError("TypeSafe key file missing or not owner-only")
     if agent_path.exists():
         raise ValueError("LaunchAgent already exists: " + str(agent_path))
-    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py"):
         if not (source_dir() / filename).exists():
             raise ValueError("missing source: " + filename)
     original_text = config_path.read_text()
@@ -590,7 +591,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = root / "backups" / ("config-" + timestamp + ".toml")
     atomic_write(backup, original_text.encode())
-    for filename in ("manage.py", "core.py", "costs.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py"):
         source = source_dir() / filename
         if not source.exists():
             raise ValueError("missing source: " + filename)
@@ -655,6 +656,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         save_config(config_path, updated)
         (bin_dir / "codex-native").symlink_to(native_wrapper)
         (bin_dir / "jev-codex").symlink_to(wrapper)
+        (bin_dir / "effortlane").symlink_to(wrapper)
         codex.unlink()
         codex.symlink_to(wrapper)
         if start:
@@ -664,7 +666,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
             codex.unlink()
         if not codex.exists() and not codex.is_symlink():
             codex.symlink_to(original_link)
-        for name, target in (("codex-native", native_wrapper), ("jev-codex", wrapper)):
+        for name, target in (("codex-native", native_wrapper), ("jev-codex", wrapper), ("effortlane", wrapper)):
             path = bin_dir / name
             if path.is_symlink() and os.readlink(path) == str(target):
                 path.unlink()
@@ -987,9 +989,10 @@ def rollback(root: Path = ROOT, stop: bool = True) -> None:
     codex.unlink()
     codex.symlink_to(manifest["original_codex_link"])
     native.unlink()
-    jev = bin_dir / "jev-codex"
-    if jev.is_symlink() and Path(os.readlink(jev)) == wrapper:
-        jev.unlink()
+    for name in ("effortlane", "jev-codex"):
+        command = bin_dir / name
+        if command.is_symlink() and Path(os.readlink(command)) == wrapper:
+            command.unlink()
     agent = Path(manifest["agent_path"])
     if agent.exists() and agent.read_bytes() == plist_content(root, python_executable()):
         agent.unlink()
@@ -1749,7 +1752,27 @@ def _strip_cli_alias_model(argv: list[str]) -> tuple[list[str], str | None]:
     return clean, alias
 
 
+def brand_cli_args(argv: list[str]) -> list[str]:
+    """Normalize public flags/model IDs without changing positional prompt text."""
+    flags = {"--effortlane-auto": "--jev-auto", "--effortlane-shadow": "--jev-shadow",
+             "--effortlane-off": "--jev-off"}
+    models = {"effortlane-auto": "jev-auto", "effortlane-shadow": "jev-shadow"}
+    result = []
+    previous = None
+    for arg in argv:
+        if previous in ("-m", "--model"):
+            value = models.get(arg, arg)
+        elif arg.startswith("--model="):
+            value = "--model=" + models.get(arg[8:], arg[8:])
+        else:
+            value = flags.get(arg, arg)
+        result.append(value)
+        previous = arg
+    return result
+
+
 def cli_args(argv: list[str], root: Path = ROOT, stdin_tty: bool = True) -> list[str]:
+    argv = brand_cli_args(argv)
     manifest = load_json(root / "manifest.json")
     native = cli_target(manifest)
     bypass = str(Path(manifest["bin_dir"]) / "codex-native")
@@ -1876,6 +1899,7 @@ def native_main() -> None:
 
 def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
     """Use the native TUI with pre-turn routing when an alias is selected."""
+    argv = brand_cli_args(argv)
     try:
         manifest = load_json(root / "manifest.json")
         config = load_json(root / "config.json")
@@ -1922,11 +1946,11 @@ def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"install", "status", "doctor", "report", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "desktop-refresh-models", "cli-set-native", "cli-refresh-models",
+    commands = {"install", "status", "doctor", "report", "metrics", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "desktop-refresh-models", "cli-set-native", "cli-refresh-models",
                 "desktop-enable", "desktop-disable", "desktop-safe"}
-    # Only jev-codex subcommands manage installation. The transparent codex link always passes native commands.
+    # Only Effortlane and its legacy command manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
-    if invoked in ("jev-codex", "manage.py") and argv and argv[0] in commands:
+    if invoked in ("effortlane", "jev-codex", "manage.py") and argv and argv[0] in commands:
         cmd = argv[0]
         try:
             if cmd == "install":
@@ -1944,19 +1968,19 @@ def main() -> None:
             elif cmd == "desktop-safe": print(json.dumps(desktop_safe(), indent=2))
             elif cmd == "desktop-refresh-native":
                 if len(argv) != 3 or argv[1] != "--native":
-                    raise ValueError("usage: jev-codex desktop-refresh-native --native /absolute/path/to/codex")
+                    raise ValueError("usage: effortlane desktop-refresh-native --native /absolute/path/to/codex")
                 print(json.dumps(desktop_refresh_native(Path(argv[2])), indent=2))
             elif cmd == "desktop-refresh-models":
                 if len(argv) != 1:
-                    raise ValueError("usage: jev-codex desktop-refresh-models")
+                    raise ValueError("usage: effortlane desktop-refresh-models")
                 print(json.dumps(desktop_refresh_catalog(), indent=2))
             elif cmd == "cli-set-native":
                 if len(argv) != 3 or argv[1] != "--native":
-                    raise ValueError("usage: jev-codex cli-set-native --native /absolute/path/to/codex")
+                    raise ValueError("usage: effortlane cli-set-native --native /absolute/path/to/codex")
                 print(json.dumps(cli_set_target(Path(argv[2])), indent=2))
             elif cmd == "cli-refresh-models":
                 if len(argv) != 1 and (len(argv) != 3 or argv[1] != "--catalog"):
-                    raise ValueError("usage: jev-codex cli-refresh-models [--catalog /absolute/path/to/native-account-models.json]")
+                    raise ValueError("usage: effortlane cli-refresh-models [--catalog /absolute/path/to/native-account-models.json]")
                 print(json.dumps(cli_refresh_catalog(Path(argv[2]) if len(argv) == 3 else None), indent=2))
             elif cmd == "rollback": rollback()
             elif cmd == "update": update_catalog()
@@ -1964,12 +1988,17 @@ def main() -> None:
             elif cmd == "doctor": print(json.dumps(doctor(), indent=2))
             elif cmd == "report":
                 if len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--weights"):
-                    raise ValueError("usage: jev-codex report [--weights path.json]")
+                    raise ValueError("usage: effortlane report [--weights path.json]")
                 weights = load_json(Path(argv[2])) if len(argv) == 3 else None
                 print(json.dumps(report(weights=weights), indent=2))
+            elif cmd == "metrics":
+                if len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--hours"):
+                    raise ValueError("usage: effortlane metrics [--hours 1..720]")
+                from metrics import metrics_report
+                print(json.dumps(metrics_report(list(telemetry_rows(ROOT)), int(argv[2]) if len(argv) == 3 else 168), indent=2))
             elif cmd == "cost":
                 if len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--hours"):
-                    raise ValueError("usage: jev-codex cost [--hours 1..720]")
+                    raise ValueError("usage: effortlane cost [--hours 1..720]")
                 from costs import cost_report
                 hours = int(argv[2]) if len(argv) == 3 else 168
                 print(json.dumps(cost_report(list(telemetry_rows(ROOT)), hours), indent=2))
@@ -1977,7 +2006,7 @@ def main() -> None:
                 options = argv[1:]
                 if (len(options) % 2 or any(options[i] not in ("--hours", "--since") for i in range(0, len(options), 2))
                         or len(set(options[::2])) != len(options) // 2):
-                    raise ValueError("usage: jev-codex savings [--hours 1..720] [--since ISO-8601-UTC]")
+                    raise ValueError("usage: effortlane savings [--hours 1..720] [--since ISO-8601-UTC]")
                 settings = dict(zip(options[::2], options[1::2]))
                 since = None
                 if "--since" in settings:
@@ -1997,7 +2026,7 @@ def main() -> None:
             elif cmd == "evaluate":
                 options = argv[1:]
                 if len(options) % 2 or any(options[i] not in ("--hours", "--labels", "--since") for i in range(0, len(options), 2)) or len(set(options[::2])) != len(options) // 2:
-                    raise ValueError("usage: jev-codex evaluate [--hours 1..720] [--since ISO-8601-UTC] [--labels path.jsonl]")
+                    raise ValueError("usage: effortlane evaluate [--hours 1..720] [--since ISO-8601-UTC] [--labels path.jsonl]")
                 settings = dict(zip(options[::2], options[1::2]))
                 since = None
                 if "--since" in settings:
@@ -2013,22 +2042,22 @@ def main() -> None:
                                           since=since), indent=2))
             elif cmd == "trace":
                 if len(argv) != 2:
-                    raise ValueError("usage: jev-codex trace THREAD_UUID")
+                    raise ValueError("usage: effortlane trace THREAD_UUID")
                 print(json.dumps(trace(argv[1]), indent=2))
             elif cmd == "route":
                 if len(argv) != 2:
-                    raise ValueError("usage: jev-codex route THREAD_UUID")
+                    raise ValueError("usage: effortlane route THREAD_UUID")
                 print(json.dumps(route(argv[1]), indent=2))
         except (OSError, ValueError, RuntimeError) as exc:
-            print(f"jev-codex {cmd}: {exc}", file=sys.stderr)
+            print(f"Effortlane {cmd}: {exc}", file=sys.stderr)
             raise SystemExit(1)
         return
     if not (ROOT / "manifest.json").exists():
-        print("jev-codex is not installed", file=sys.stderr)
+        print("Effortlane is not installed", file=sys.stderr)
         raise SystemExit(1)
     if invoked == "codex" and argv == ["update"]:
         raise SystemExit(cli_update_and_refresh())
-    if invoked == "codex" and sys.stdin.isatty():
+    if invoked in ("codex", "effortlane", "jev-codex") and sys.stdin.isatty():
         bridge_args = cli_bridge_args(argv)
         if bridge_args is not None:
             from cli_bridge import run

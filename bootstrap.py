@@ -21,7 +21,7 @@ def native_binary(explicit: Path | None = None) -> Path:
     if not candidate.is_file() or not os.access(candidate, os.X_OK):
         raise ValueError("native Codex CLI missing; install Codex and sign in first")
     if manage.ROOT in candidate.resolve().parents:
-        raise ValueError("Jev is already installed; use jev-codex status")
+        raise ValueError("Effortlane is already installed; use effortlane status")
     return candidate
 
 
@@ -55,7 +55,7 @@ def key_file(explicit: Path | None = None) -> Path:
 
 def run(native: Path | None = None, key: Path | None = None) -> None:
     if (manage.ROOT / "manifest.json").exists():
-        raise ValueError("Jev is already installed; use jev-codex status")
+        raise ValueError("Effortlane is already installed; use effortlane status")
     selected = native_binary(native)
     config = manage.CODEX_CONFIG
     if not config.is_file():
@@ -81,7 +81,7 @@ def run(native: Path | None = None, key: Path | None = None) -> None:
                     manage.cli_refresh_catalog(catalog_path=cli_cache)
                 except (OSError, ValueError, RuntimeError):
                     print("CLI catalog setup incomplete; native fallback remains available. "
-                          "Run jev-codex doctor and cli-refresh-models.", file=sys.stderr)
+                          "Run effortlane doctor and cli-refresh-models.", file=sys.stderr)
     except Exception:
         link = manage.BIN / "codex"
         if created_link and link.is_symlink() and os.readlink(link) == str(selected):
@@ -90,8 +90,8 @@ def run(native: Path | None = None, key: Path | None = None) -> None:
     policy = manage.load_json(manage.ROOT / "config.json")
     policy["mode"] = "auto"
     manage.write_json(manage.ROOT / "config.json", policy)
-    print("Jev CLI Auto installed. Native ChatGPT/Codex login preserved.")
-    print("Verify: ~/.local/bin/jev-codex doctor")
+    print("Effortlane CLI Auto installed. Native ChatGPT/Codex login preserved.")
+    print("Verify: ~/.local/bin/effortlane doctor")
     if Path(shutil.which("codex") or "").resolve() != (manage.BIN / "codex").resolve():
         print("Put ~/.local/bin before other Codex binaries in PATH, then open a new terminal.")
     print("Desktop stays native; experimental Desktop adapter is opt-in.")
@@ -105,7 +105,7 @@ def main() -> None:
     try:
         run(args.native, args.key_file)
     except (OSError, ValueError, RuntimeError) as exc:
-        parser.exit(1, "Jev install: " + str(exc) + "\n")
+        parser.exit(1, "Effortlane install: " + str(exc) + "\n")
 
 
 if __name__ == "__main__":

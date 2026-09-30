@@ -777,7 +777,47 @@ class Router:
             "prior_failed": decision.get("prior_failed") is True,
             "manual_override": decision.get("manual_override") is True,
             "command_failures": min(_bounded_int(decision.get("command_failures")), 255),
+            "schema_version": 2,
+            "usage_scope": decision.get("usage_scope") if decision.get("usage_scope") in ("last_model_call", "model_call") else "model_call",
+            "reasoning_output_tokens": (_bounded_int(usage["output_tokens_details"]["reasoning_tokens"])
+                if not usage_missing and isinstance(usage.get("output_tokens_details"), dict)
+                and isinstance(usage["output_tokens_details"].get("reasoning_tokens"), int)
+                and not isinstance(usage["output_tokens_details"]["reasoning_tokens"], bool)
+                and 0 <= usage["output_tokens_details"]["reasoning_tokens"] <= usage.get("output_tokens", -1) else None),
+            **{key: min(decision[key], 86_400_000 if key.endswith("_ms") else 1_000_000)
+               if isinstance(decision.get(key), int) and not isinstance(decision[key], bool) and decision[key] >= 0 else None
+               for key in ("turn_duration_ms", "first_response_ms", "tool_calls", "compactions")},
         }
+        self._write_record(record)
+
+    def record_subscription(self, snapshot: dict, client: str) -> None:
+        """Record only quota metadata; omit credit balances and unknown raw IDs."""
+        if not isinstance(snapshot, dict):
+            return
+        def window(raw):
+            if not isinstance(raw, dict):
+                return None
+            used = raw.get("usedPercent")
+            duration, reset = raw.get("windowDurationMins"), raw.get("resetsAt")
+            if not isinstance(used, (int, float)) or isinstance(used, bool) or not math.isfinite(used) or not 0 <= used <= 100:
+                return None
+            return {"used_percent": used,
+                    "window_minutes": duration if isinstance(duration, int) and not isinstance(duration, bool) and 0 < duration <= 525600 else None,
+                    "resets_at": reset if isinstance(reset, int) and not isinstance(reset, bool) and reset >= 0 else None}
+        primary, secondary = window(snapshot.get("primary")), window(snapshot.get("secondary"))
+        if primary is None and secondary is None:
+            return
+        raw_id = snapshot.get("limitId")
+        limit_id = "codex" if raw_id in (None, "codex") else self._safe_model(raw_id)
+        if not limit_id:
+            limit_id = "quota-" + hashlib.sha256(str(raw_id).encode("utf-8", "replace")).hexdigest()[:24]
+        self._write_record({"schema_version": 2, "event": "subscription", "ts": int(time.time()),
+                            "client": client if client in ("cli", "desktop") else "other",
+                            "limit_id": limit_id,
+                            "plan_type": snapshot.get("planType") if snapshot.get("planType") in ("free", "plus", "pro", "team", "business", "enterprise", "edu") else None,
+                            "primary": primary, "secondary": secondary})
+
+    def _write_record(self, record: dict) -> None:
         try:
             self.telemetry_path.parent.mkdir(parents=True, exist_ok=True)
             os.chmod(self.telemetry_path.parent, 0o700)

@@ -34,15 +34,15 @@ Requirements: macOS, Python 3.11+, native Codex installed and signed in, and a T
 git clone https://github.com/itscloud0/effortlane.git
 cd effortlane
 python3 bootstrap.py
-jev-codex doctor
+effortlane doctor
 codex
 ```
 
 The installer asks for the Jev key with hidden input, backs up existing Codex configuration, and installs at user level. It never asks you to paste a key into a GitHub issue. No per-repository setup is required. If `~/.local/bin` is not first on your `PATH`, the installer prints the remaining shell step.
 
-Already installed? See [update and recovery](docs/OPERATIONS.md#report). Renaming this GitHub repository does not change your local `jev-codex` command or installation directory.
+Already installed? See [update and recovery](docs/OPERATIONS.md#report). The public command is `effortlane`; legacy command aliases and installation paths remain compatible.
 
-The picker displays **Effortlane Auto / Effortlane Shadow**. Internal IDs (`jev-auto`, `jev-shadow`) and `--jev-auto` / `--jev-shadow` flags remain compatible with existing sessions and scripts.
+The picker displays **Effortlane Auto / Effortlane Shadow**. Internal IDs (`jev-auto`, `jev-shadow`) and `--effortlane-auto` / `--effortlane-shadow` flags remain compatible with existing sessions and scripts.
 
 ### Pick how much control to give Jev
 
@@ -53,13 +53,13 @@ The picker displays **Effortlane Auto / Effortlane Shadow**. Internal IDs (`jev-
 | **Concrete model** | Your selected model | Manual model choice bypasses automatic routing |
 
 ```sh
-codex --jev-shadow             # observe decisions without applying them
-codex exec --jev-shadow "Explain this module"
-jev-codex status
-jev-codex trace THREAD_UUID
+codex --effortlane-shadow             # observe decisions without applying them
+codex exec --effortlane-shadow "Explain this module"
+effortlane status
+effortlane trace THREAD_UUID
 ```
 
-Desktop stays native until you explicitly run `jev-codex desktop-enable` and restart the app. `jev-codex desktop-safe` restores native Desktop if compatibility regresses; restart afterward. [Desktop compatibility details](docs/OPERATIONS.md#limits).
+Desktop stays native until you explicitly run `effortlane desktop-enable` and restart the app. `effortlane desktop-safe` restores native Desktop if compatibility regresses; restart afterward. [Desktop compatibility details](docs/OPERATIONS.md#limits).
 
 ## How it works
 
@@ -97,9 +97,12 @@ The observed account-wide weekly Pro meter rose from **4% to 9%** over approxima
 [Full evidence and limitations](SHADOW_COMPARISON.md). Long-term evaluation should compare subscription allowance, accepted work, elapsed time, and rework across comparable periods. API-price simulations are secondary diagnostics, not subscription economics.
 
 ```sh
-jev-codex evaluate --hours 168
-jev-codex savings --hours 168
+effortlane metrics --hours 168
+effortlane evaluate --hours 168
+effortlane savings --hours 168
 ```
+
+[Metrics reference](docs/METRICS.md) covers account quota snapshots, model/effort distributions, latency, cache coverage, and missing observations. Records stay local; no background telemetry upload is added.
 
 The `savings` command includes token-rate counterfactuals. Its output does not prove saved Pro allowance. Neither token totals nor successful tool exits alone establish completed-task quality.
 
@@ -118,10 +121,10 @@ Local services bind only to `127.0.0.1`. Credentials stay in owner-only local fi
 ## Disable and recover
 
 ```sh
-jev-codex disable          # disable routing
+effortlane disable          # disable routing
 codex-native              # explicit native CLI bypass
-jev-codex desktop-safe    # restore native Desktop; restart the app
-jev-codex rollback        # restore backed-up managed installation settings
+effortlane desktop-safe    # restore native Desktop; restart the app
+effortlane rollback        # restore backed-up managed installation settings
 ```
 
 Ownership checks preserve unrelated or manually changed files. The installer does not modify the ChatGPT app bundle, delete sessions, or log you out. [Full recovery procedures](docs/OPERATIONS.md#limits).
@@ -129,6 +132,8 @@ Ownership checks preserve unrelated or manually changed files. The installer doe
 ## Documentation
 
 - [Operations, installation, policy, updates, and known limitations](docs/OPERATIONS.md)
+- [Metrics and measurement limits](docs/METRICS.md)
+- [Legacy compatibility](docs/COMPATIBILITY.md)
 - [Measurement history and evidence](SHADOW_COMPARISON.md)
 - [Contributing and reporting useful measurements](CONTRIBUTING.md)
 - [Security](SECURITY.md)
