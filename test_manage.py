@@ -31,6 +31,10 @@ class ConfigSurgeryTests(unittest.TestCase):
             if model["slug"] in aliases:
                 model["display_name"] = "Jev Auto" if model["slug"] == "jev-auto" else "Jev Shadow"
         self.assertTrue(manage.is_managed_catalog(catalog, native))
+        for model in catalog["models"]:
+            if model["slug"] in aliases:
+                model["description"] = model["description"].replace("Effortlane", "Jev")
+        self.assertTrue(manage.is_managed_catalog(catalog, native))
         catalog["models"][-1]["description"] = "user modification"
         self.assertFalse(manage.is_managed_catalog(catalog, native))
 
@@ -123,7 +127,7 @@ class InstallTests(unittest.TestCase):
         aliases = {item["slug"]: item for item in manage.managed_catalog(native)["models"]
                    if item["slug"].startswith("jev-")}
         self.assertEqual(aliases["jev-auto"]["supported_reasoning_levels"], [{"effort": "medium"}])
-        self.assertIn("Jev chooses", aliases["jev-auto"]["description"])
+        self.assertIn("Effortlane chooses", aliases["jev-auto"]["description"])
         self.assertEqual([level["effort"] for level in aliases["jev-shadow"]["supported_reasoning_levels"]],
                          ["low", "medium", "high"])
         self.assertEqual(aliases["jev-shadow"]["default_reasoning_level"], "medium")
@@ -470,7 +474,7 @@ class InstallTests(unittest.TestCase):
 
     def test_cli_target_rejects_router_wrapper(self):
         self.install()
-        with self.assertRaisesRegex(ValueError, "Jev wrapper"):
+        with self.assertRaisesRegex(ValueError, "Effortlane wrapper"):
             manage.cli_set_target(self.root / "jev-codex", self.root)
         self.assertEqual(manage.load_json(self.root / "manifest.json")["cli_target"], str(self.real))
 

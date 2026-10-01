@@ -148,11 +148,11 @@ def managed_catalog(native: dict) -> dict:
         alias = copy.deepcopy(sol)
         alias["slug"] = slug
         alias["display_name"] = name
-        alias["description"] = ("Jev chooses the execution model and reasoning effort; "
+        alias["description"] = ("Effortlane chooses the execution model and reasoning effort; "
                                 "the displayed effort is not the execution effort."
                                 if slug == "jev-auto" else
                                 "Runs the latest available Sol at the selected effort; "
-                                "Jev independently proposes a model and effort.")
+                                "Effortlane independently proposes a model and effort.")
         # Auto ignores the visible effort; Shadow applies it to Sol only.
         advertised = [level for level in sol.get("supported_reasoning_levels", [])
                       if isinstance(level, dict) and level.get("effort") == "medium"] if slug == "jev-auto" else [
@@ -176,11 +176,17 @@ def is_managed_catalog(current: dict, native: dict) -> bool:
     expected = managed_catalog(native)
     if current == expected:
         return True
-    legacy = copy.deepcopy(expected)
-    for model in legacy["models"]:
-        if model.get("slug") in ("jev-auto", "jev-shadow"):
-            model["display_name"] = "Jev Auto" if model["slug"] == "jev-auto" else "Jev Shadow"
-    return current == legacy
+    for old_names, old_descriptions in ((True, False), (False, True), (True, True)):
+        legacy = copy.deepcopy(expected)
+        for model in legacy["models"]:
+            if model.get("slug") in ("jev-auto", "jev-shadow"):
+                if old_names:
+                    model["display_name"] = "Jev Auto" if model["slug"] == "jev-auto" else "Jev Shadow"
+                if old_descriptions:
+                    model["description"] = model["description"].replace("Effortlane", "Jev")
+        if current == legacy:
+            return True
+    return False
 
 
 def plist_content(root: Path, python: Path) -> bytes:
@@ -537,7 +543,7 @@ def cli_set_target(native: Path, root: Path = ROOT) -> dict:
     if not native.is_absolute() or not native.is_file() or not os.access(native, os.X_OK):
         raise ValueError("CLI binary missing or not executable: " + str(native))
     if native.resolve() in ((root / "jev-codex").resolve(), (root / "codex-native").resolve()):
-        raise ValueError("CLI target cannot point to a Jev wrapper")
+        raise ValueError("CLI target cannot point to an Effortlane wrapper")
     manifest_path = root / "manifest.json"
     manifest = load_json(manifest_path)
     if manifest.get("cli_target", manifest["native_target"]) == str(native):
@@ -1263,13 +1269,13 @@ def doctor(root: Path = ROOT) -> dict:
     if not checks["cli_binary_executable"] and cli_binary != native_binary:
         issues.append(f"cli_target missing or not executable: {cli_binary}; CLI falls back to native_target")
     if not checks["cli_catalog_matches_latest_sol"]:
-        issues.append("CLI Jev alias metadata differs from its latest Sol model")
+        issues.append("CLI Effortlane alias metadata differs from its latest Sol model")
     if not checks["cli_catalog_generation_valid"]:
         issues.append("CLI catalog generation is incomplete; CLI falls back to Desktop catalog")
     if not checks["desktop_adapter_active"]:
-        issues.append("Desktop runtime does not match Jev enable/disable state; fully quit and reopen ChatGPT.app")
+        issues.append("Desktop runtime does not match Effortlane enable/disable state; fully quit and reopen ChatGPT.app")
     if checks.get("account_catalog_matches_installed") is False:
-        issues.append("account model cache differs from installed catalog; refresh native models before updating Jev")
+        issues.append("account model cache differs from installed catalog; refresh native models before updating Effortlane")
     return {"ok": all(checks.values()), "checks": checks, "issues": issues,
             "note": "Static and local-process checks only. Stale account caches are skipped; run desktop-refresh-models to fetch fresh Desktop metadata. A native routed turn and built-in tools still need a smoke test after updates."}
 
