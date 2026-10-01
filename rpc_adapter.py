@@ -292,7 +292,8 @@ class Adapter:
             rewritten = self._client(raw)
         except Exception:
             # A routing/state failure must not forward a synthetic model to Codex.
-            print("Effortlane adapter: routing failed; falling back to native model.", file=sys.stderr)
+            if self.client_name != "cli":
+                print("Effortlane adapter: routing failed; falling back to native model.", file=sys.stderr)
             rewritten = raw
         return self._native_model_guard(rewritten)
 

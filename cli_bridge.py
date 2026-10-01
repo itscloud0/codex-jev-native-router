@@ -173,7 +173,9 @@ def _serve_connection(connection: socket.socket, stream, root: Path, native: Pat
     with connection, stream:
         child = subprocess.Popen([str(native), "-c", "model_catalog_json=" + json.dumps(str(cli_catalog_path(root, "models.json"))),
                                   "app-server", "--listen", "stdio://"],
-                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
+                                 # Only the foreground TUI owns the terminal. Backend stderr may
+                                 # contain raw command text and corrupt the input editor.
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         adapter = Adapter(root, client="cli", initial_alias=initial_alias,
                           catalog_path=cli_catalog_path(root, "native-models.json"))
         assert child.stdin is not None and child.stdout is not None
@@ -255,7 +257,8 @@ def serve_one(listener: socket.socket, root: Path, native: Path, token: str,
                 ready=ready if first else None, progress=progress if first else None)
         except TimeoutError as exc:
             if first and not stopped.is_set():
-                print(f"Jev TUI bridge: {exc}", file=sys.stderr, flush=True)
+                if progress is not None:
+                    progress["stage"] = "connection timed out"
                 return
             continue
         except OSError:

@@ -1,6 +1,7 @@
 import json
 import hashlib
 import io
+from contextlib import redirect_stderr
 import os
 import stat
 import subprocess
@@ -80,6 +81,14 @@ class AdapterTests(unittest.TestCase):
                 self.assertEqual(sent['params']['collaborationMode']['settings']['model'], 'gpt-6-sol')
                 self.assertEqual(sent['params']['effort'], 'high')
                 self.assertEqual(sent['params']['input'], [{'type': 'text', 'text': 'preserve'}])
+
+    def test_cli_state_failure_does_not_print_over_tui(self):
+        cli = rpc_adapter.Adapter(self.root, router=self.router, client='cli')
+        output = io.StringIO()
+        with mock.patch.object(cli.store, 'get', side_effect=OSError('test-only')), redirect_stderr(output):
+            sent = json.loads(cli.client(request('turn/start', {'threadId': 'broken', 'model': 'jev-shadow'})))
+        self.assertEqual(sent['params']['model'], 'gpt-6-sol')
+        self.assertEqual(output.getvalue(), '')
 
     def test_native_guard_preserves_concrete_manual_model(self):
         raw = request('turn/start', {'model': 'jev-shadow', 'config': {'model': 'gpt-6-astra'}})

@@ -179,3 +179,9 @@ MIT licensed. Contributions and reproducible outcome measurements are welcome.
 If a turn reports that `jev-shadow` or `jev-auto` is unsupported, a synthetic picker ID reached the native executor. The RPC adapter now guards native model fields, including `config.model` and collaboration settings. A routing/state exception falls back to a concrete native model while preserving the original input; custom provider requests remain untouched. Regression tests cover state failure and configuration overrides. This guard does not repair a process that bypasses the adapter entirely.
 
 Installed code is loaded at process start. Exit and reopen only the affected CLI session, then resume its thread. An already-running adapter retains its old code. There is no need to delete history, log out, or restart other healthy chats.
+
+### Backend logs overwrite the CLI input box
+
+The foreground native TUI must be the sole owner of terminal output. The Effortlane CLI bridge discards the background app-server's raw stderr instead of inheriting the terminal; structured protocol responses still flow to the TUI. This avoids rendering corruption and avoids storing raw command/source fragments in an extra router log. CLI adapter fallback diagnostics stay off the active terminal, and initial connection timeout diagnostics are deferred until the foreground process exits. Explicit `JEV_BRIDGE_DEBUG=1` still prints protocol method names and is intended only for troubleshooting.
+
+Reopen the affected CLI process to load the fix. A tool's patch-validation or command-policy failure is a separate issue: suppressing raw stderr does not make a rejected operation succeed.

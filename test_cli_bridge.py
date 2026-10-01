@@ -5,7 +5,7 @@ import socket
 import struct
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import cli_bridge
 
@@ -19,6 +19,16 @@ def client_frame(data: bytes, opcode: int = 1, fin: bool = True) -> bytes:
 
 
 class WebSocketTests(unittest.TestCase):
+    def test_background_server_cannot_write_into_foreground_terminal(self):
+        child = Mock(stdin=io.BytesIO(), stdout=io.BytesIO())
+        connection = MagicMock()
+        with (patch.object(cli_bridge.subprocess, 'Popen', return_value=child) as launch,
+              patch.object(cli_bridge, 'Adapter'),
+              patch.object(cli_bridge, 'cli_catalog_path', return_value=Path('/tmp/catalog.json'))):
+            cli_bridge._serve_connection(connection, io.BytesIO(), Path('/tmp'), Path('/native'))
+        self.assertEqual(launch.call_args.kwargs['stderr'], cli_bridge.subprocess.DEVNULL)
+        self.assertEqual(launch.call_args.kwargs['stdout'], cli_bridge.subprocess.PIPE)
+
     def test_selected_alias_accepts_native_cli_model_syntaxes(self):
         for args, expected in ((['-m', 'jev-auto'], 'jev-auto'),
                                (['--model=jev-shadow'], 'jev-shadow'),
@@ -120,6 +130,7 @@ class WebSocketTests(unittest.TestCase):
               redirect_stderr(output)):
             popen.return_value.wait.return_value = 1
             self.assertEqual(cli_bridge.run(Path("/tmp"), Path("/native"), ["-m", "jev-auto", "resume"]), 1)
+        self.assertIsNone(popen.call_args.kwargs["stderr"])
         direct.assert_not_called()
         self.assertEqual(aliases, ["jev-auto"])
         self.assertIn("last stage: starting accept thread", output.getvalue())
