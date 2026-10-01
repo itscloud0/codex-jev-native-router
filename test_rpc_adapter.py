@@ -57,6 +57,37 @@ class AdapterTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_config_alias_cannot_override_routed_native_model(self):
+        sent = json.loads(self.adapter.client(request('turn/start', {
+            'threadId': 'config-shadow', 'model': 'jev-shadow', 'effort': 'high',
+            'config': {'model': 'jev-shadow', 'unrelated': 'preserve'},
+            'input': [{'type': 'text', 'text': 'test'}, {'type': 'image', 'url': 'test-only'}]})))
+        self.assertEqual(sent['params']['config']['model'], sent['params']['model'])
+        self.assertNotIn(sent['params']['model'], core.ALIASES)
+        self.assertEqual(sent['params']['config']['unrelated'], 'preserve')
+        self.assertEqual(sent['params']['input'][1], {'type': 'image', 'url': 'test-only'})
+
+    def test_state_failure_fails_open_without_leaking_alias(self):
+        for method in ('thread/start', 'thread/resume', 'turn/start'):
+            with self.subTest(method=method), mock.patch.object(self.adapter.store, 'get', side_effect=OSError('test-only')):
+                sent = json.loads(self.adapter.client(request(method, {
+                    'threadId': 'broken', 'model': 'jev-shadow', 'effort': 'high',
+                    'config': {'model': 'jev-shadow'},
+                    'collaborationMode': {'settings': {'model': 'jev-shadow', 'reasoning_effort': 'high'}},
+                    'input': [{'type': 'text', 'text': 'preserve'}]})))
+                self.assertEqual(sent['params']['model'], 'gpt-6-sol')
+                self.assertEqual(sent['params']['config']['model'], 'gpt-6-sol')
+                self.assertEqual(sent['params']['collaborationMode']['settings']['model'], 'gpt-6-sol')
+                self.assertEqual(sent['params']['effort'], 'high')
+                self.assertEqual(sent['params']['input'], [{'type': 'text', 'text': 'preserve'}])
+
+    def test_native_guard_preserves_concrete_manual_model(self):
+        raw = request('turn/start', {'model': 'jev-shadow', 'config': {'model': 'gpt-6-astra'}})
+        guarded = json.loads(self.adapter._native_model_guard(raw))
+        self.assertEqual(guarded['params']['model'], 'gpt-6-astra')
+        self.assertEqual(guarded['params']['config']['model'], 'gpt-6-astra')
+        self.assertEqual(self.adapter._native_model_guard(request('model/list', {})), request('model/list', {}))
+
     def test_auto_astra_proposal_is_clamped_but_concrete_astra_passes(self):
         self.router.model = 'gpt-6-astra'
         routed = json.loads(self.adapter.client(request('turn/start', {'threadId': 'auto', 'model': 'jev-auto',

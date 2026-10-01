@@ -173,3 +173,9 @@ claim of better completion quality or quota savings.
 [Astra-Ares](https://github.com/miuuyy/Astra-Ares) adapts effort between model generations through a separately patched Codex CLI; it keeps the selected model fixed and does not integrate with this Desktop adapter. [pi-shift-router](https://github.com/green-dalii/pi-shift-router) combines tier routing, cache-aware thresholds and task-level subagent orchestration in Pi. [BitRouter](https://github.com/bitrouter/bitrouter) builds an outcome-driven proxy/control plane. Their ideas are useful for future evaluation, but their runtime and integration assumptions differ from native Codex Desktop. The backtest in `0xNatoshi/jev-codex-router` holds token counts fixed under alternative models, so it estimates API-equivalent spend rather than proven completion quality or Pro allowance savings.
 
 MIT licensed. Contributions and reproducible outcome measurements are welcome.
+
+### Synthetic model rejected by ChatGPT authentication
+
+If a turn reports that `jev-shadow` or `jev-auto` is unsupported, a synthetic picker ID reached the native executor. The RPC adapter now guards native model fields, including `config.model` and collaboration settings. A routing/state exception falls back to a concrete native model while preserving the original input; custom provider requests remain untouched. Regression tests cover state failure and configuration overrides. This guard does not repair a process that bypasses the adapter entirely.
+
+Installed code is loaded at process start. Exit and reopen only the affected CLI session, then resume its thread. An already-running adapter retains its old code. There is no need to delete history, log out, or restart other healthy chats.

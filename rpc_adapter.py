@@ -288,6 +288,47 @@ class Adapter:
         return True
 
     def client(self, raw: bytes) -> bytes:
+        try:
+            rewritten = self._client(raw)
+        except Exception:
+            # A routing/state failure must not forward a synthetic model to Codex.
+            print("Effortlane adapter: routing failed; falling back to native model.", file=sys.stderr)
+            rewritten = raw
+        return self._native_model_guard(rewritten)
+
+    def _native_model_guard(self, raw: bytes) -> bytes:
+        """Remove synthetic model IDs at the native boundary, including config overrides."""
+        message = _decode(raw)
+        if not message or message.get("method") not in (
+                "thread/start", "thread/resume", "thread/fork", "thread/settings/update", "turn/start"):
+            return raw
+        params = message.get("params")
+        if not isinstance(params, dict) or _custom_provider(params):
+            return raw
+        config = params.get("config")
+        collab = params.get("collaborationMode")
+        settings = collab.get("settings") if isinstance(collab, dict) else None
+        containers = [item for item in (config, settings, params) if isinstance(item, dict)]
+        if not any(_alias(item.get("model")) for item in containers):
+            return raw
+        # Preserve a concrete manual selection or the already-routed model.
+        model = next((item["model"] for item in containers
+                      if isinstance(item.get("model"), str) and item["model"] and not _alias(item["model"])), None)
+        thread_id = params.get("threadId")
+        previous = self.actual.get(thread_id) if isinstance(thread_id, str) else None
+        model = model or (previous[0] if previous and not _alias(previous[0]) else self._sol())
+        changed = copy.deepcopy(message)
+        targets = [changed["params"]]
+        if isinstance(config, dict):
+            targets.append(changed["params"]["config"])
+        if isinstance(settings, dict):
+            targets.append(changed["params"]["collaborationMode"]["settings"])
+        for item in targets:
+            if _alias(item.get("model")):
+                item["model"] = model
+        return _encode(changed)
+
+    def _client(self, raw: bytes) -> bytes:
         message = _decode(raw)
         if not message or not isinstance(message.get("method"), str) or not isinstance(message.get("params"), dict):
             return raw
