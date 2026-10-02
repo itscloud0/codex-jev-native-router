@@ -104,3 +104,32 @@ Telemetry after 01:17 UTC contains 75 Shadow route decisions across 17 pseudonym
 Coverage is mixed: the window contains 74 raw Shadow usage records, 41 native records, and five Auto records. The latest Shadow route is at 06:07:49 UTC; executor telemetry continues to 14:58:37 UTC. At audit time, the global Codex default is `jev-auto`/medium, not Shadow. Explicit existing-chat selections may differ. Thus elapsed time must not be presented as a full fourteen-hour all-Shadow experiment. Zero human outcome labels exist, and technical turn completion does not prove correct work.
 
 No allowance saving versus fixed GPT-6.1 Sol has been demonstrated. Shadow intentionally executes that same baseline, with additional Jev decision overhead. Jev's separate vendor token-rate estimate is not an OpenAI subscription charge and is not a verified TypeSafe bill. A useful next comparison needs account allowance deltas over non-overlapping, comparable Auto and fixed-Sol work periods, recorded task outcomes/rework and model/effort, while noting concurrent account activity and resets. Shadow predictions alone cannot reveal how many retries or allowance units the unexecuted Luna policy would consume.
+
+## Updated Shadow observations — 2026-10-02, 18:18 UTC
+
+This manually updated aggregate snapshot covers a rolling 168-hour telemetry window. Shadow decisions themselves span 2026-09-29 23:57 UTC through 2026-10-02 18:17 UTC (about 66 hours). It is not a randomized benchmark or 66 hours of active coding. The window also contains 171 Auto decisions, excluded from the Shadow proposal counts below. Diagnostic interactions are included. No prompts, source, raw session IDs, or individual quota reset identifiers are published.
+
+| Metric | Observation |
+|---|---:|
+| Shadow decisions | 360 |
+| Exactly linked usage records | 350 |
+| Actual executor | GPT-6.1 Sol |
+| Actual effort | low 7 / medium 241 / high 73 / xhigh 39 |
+| Jev-backed proposals, including cache-held candidates | 312 |
+| Proposed models | Sol 286 / Luna 26 |
+| Proposed efforts | low 48 / medium 217 / high 47 |
+| Effort compared with actual selection | lower 114 / unchanged 163 / higher 35 |
+| Luna proposals held by cache hysteresis | 16 |
+| Other route reasons | privacy fallback 41 / timeout 1 / lease 6 |
+| Cache detail coverage | 342 of 350 linked usage records |
+| Weighted cached-input ratio on observed coverage | 94.906% |
+| Median measured Jev latency on proposal coverage | 360.5 ms |
+| Native turn status in linked records | ok 325 / cancelled 21 / error 4 |
+
+The 312 proposal records are `shadow_jev` (296) and `shadow_cache_hysteresis` (16). The other 48 route records must not be represented as independent semantic Jev recommendations. A cache-held Luna proposal does not mean Auto would have executed Luna. Native `ok` status is a weak operational signal, not proof that the software task was accepted or correct.
+
+Quota snapshots first showed 10% weekly usage on September 30 at 16:43 UTC, and most recently 43% on October 2 at 18:12 UTC: an account-wide increase of 33 percentage points over approximately 49.5 elapsed hours. Client-reported reset timestamps drift by up to nine seconds; occasional intermediate percentage decreases suggest delayed or rounded readings. Groups for these nearby reset timestamps overlap and must not be summed. Concurrent native, Auto, and other sessions share this meter. The observations neither attribute consumption to Shadow nor establish a native counterfactual. Multiplying quota percentage by the $200 monthly fee is not a valid savings calculation.
+
+Usage coverage is incomplete: 261 linked records explicitly cover the last model call, and 89 older records have unknown scope. These cannot reconstruct every internal model call of a long agent turn. The cache ratio belongs to the actual Sol execution; it cannot be transferred unchanged to a hypothetical Luna execution. No validated accepted-work/rework comparison is included.
+
+**Conclusion:** lower effort was proposed on 114 of 312 recommendations (36.5%), suggesting a hypothesis worth testing. It is not a 36.5% allowance saving. Shadow executes the baseline model and user-selected effort, so its unexecuted alternatives cannot establish quality-equivalent savings. A long-term comparison must execute the candidate policy on prospectively categorized tasks and measure account allowance, accepted work, elapsed time, and rework while accounting for overlapping activity and reset windows. API-price simulations remain secondary diagnostics rather than Pro subscription economics.

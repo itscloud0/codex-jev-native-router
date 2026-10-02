@@ -75,24 +75,24 @@ The router selects an executor; it does **not** autonomously split tasks or spaw
 
 ## What we have measured
 
-**Dated local observation · September 30, 2026 · one Mac · not a benchmark.**
+**Dated local observation · October 2, 2026, 18:18 UTC · one Mac · not a benchmark.**
 
 | Observation | Result | What it establishes |
 |---|---:|---|
-| Shadow routing decisions | 75 across 17 sessions | Decisions were recorded in CLI and Desktop |
-| Exactly linked executor-call records | 71 | Traceable usage for this subset; four decisions lack a linked call |
-| Actual Shadow executor | GPT-6.1 Sol / medium | A stable baseline, not executed Jev savings |
-| Proposed model | 67 Sol · 7 Luna · 1 absent | The policy remains conservative |
-| Cached input in linked records | 95.7% | Observed cache reuse, not a benefit attributable to Jev |
-| Median measured Jev latency | 356 ms | Decision overhead in this sample |
+| Shadow routing decisions | 360 | Observed September 29–October 2; includes diagnostic interactions |
+| Exactly linked executor usage records | 350 | Ten decisions lack a linked usage record |
+| Actual Shadow executor | GPT-6.1 Sol | User-selected effort: low 7 · medium 241 · high 73 · xhigh 39 |
+| Jev-backed model proposals | 286 Sol · 26 Luna | 312 proposals, including 16 held by cache hysteresis |
+| Proposed effort | low 48 · medium 217 · high 47 | Recommendations were not executed in Shadow |
+| Effort versus actual selection | lower 114 · same 163 · higher 35 | 36.5% proposed lower effort; **not 36.5% savings** |
+| Observed cached-input ratio | 94.9% | Cache detail exists for 342 of 350 linked records; not a router-attributable benefit |
+| Median measured Jev latency | 361 ms | Additional decision overhead |
 
-**Jev also proposed effort changes.** Model selection alone misses part of the policy.
+The remaining 48 decisions were 41 privacy fallbacks, one timeout, and six leases. They are not counted as new Jev-backed proposals. Sixteen Luna proposals were held by the cache guard.
 
-<img src="assets/shadow-effort.png" alt="Of 75 Shadow decisions, Jev proposed low effort 15 times, medium 48, high 11, and no effort once. Actual execution stayed medium." width="1200">
+The account-wide weekly Pro meter rose from **10% to 43%** over approximately 49.5 elapsed hours covered by quota snapshots. Other chats and modes shared that allowance. Reset timestamps drifted by several seconds between clients, and some intermediate percentages decreased; snapshot groups must not be added together. This is **observed account consumption, not demonstrated router savings**, and it cannot be converted into a fraction of the $200 monthly subscription fee.
 
-Six Luna proposals were held by the cache guard. Lower effort might save allowance, or might cause expensive rework. Shadow did not execute those proposals, so neither result has been demonstrated.
-
-The observed account-wide weekly Pro meter rose from **4% to 9%** over approximately fourteen elapsed hours without a reset. Other chats and modes shared that allowance, and the period was not entirely Shadow. This is **not a router savings claim**. Desktop telemetry may contain only the last model call of a turn.
+Of the 350 linked usage records, 261 explicitly cover only the last model call of a turn; 89 have unknown historical scope. No validated accepted-work/rework comparison is available. **Subscription savings and engineering-quality improvements remain unproven.** Shadow data identifies candidate changes; it does not establish their token consumption or quality when executed.
 
 [Full evidence and limitations](SHADOW_COMPARISON.md). Long-term evaluation should compare subscription allowance, accepted work, elapsed time, and rework across comparable periods. API-price simulations are secondary diagnostics, not subscription economics.
 
