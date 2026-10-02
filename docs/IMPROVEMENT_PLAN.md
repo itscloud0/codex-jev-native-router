@@ -1,5 +1,38 @@
 # Measurement and Claude Code integration
 
+## Independent routing under concurrency
+
+Goal: a slow Jev request in one chat must not force an unrelated chat to Sol.
+Reproduced on 2026-10-02 with a blocked synthetic Jev response: the second chat
+returns `state_error` after the 250 ms global lock wait. A bounded sample of 160
+recent route records contained no such errors, so this does not explain past
+allowance consumption. The fix targets a demonstrated concurrency failure.
+
+Files: `core.py`, focused concurrency tests, operation notes. Keep the existing
+lease format and model policy. Use bounded session lock stripes, brief global
+read/commit locks, re-read-and-merge commits, and reject stale same-session
+decisions. Include mixed old/new process behavior in limitations. No new daemon,
+dependency, auth change, or live-process restart.
+
+Verification: observe the regression fail first; test parallel decisions, no lost
+updates, same-session serialization, legacy-writer conflicts, and bounded lock
+failure including separate processes. Then full tests, atomic local deployment
+with backup, native status checks, commit and CI. Stop at verified publication.
+
+Verification so far: all 257 tests passed, including nine concurrency regressions.
+The blocked-request fixture failed before the fix and now allows the second chat
+to select Luna while the first is still waiting; both leases survive. Tests also
+cover a shared Router, separate processes, same-session reuse and timeouts,
+stripe collisions, legacy writers, and retaining already-spent Jev token counts
+when a stale decision cannot be committed. No live model request was needed.
+
+The [TypeSafe state](https://docs.typesafe.ai/concepts/state) and
+[fan-out](https://docs.typesafe.ai/patterns/fan-out) guidance supports the existing
+bounded state and batched independent questions. Its
+[confidence routing](https://docs.typesafe.ai/patterns/confidence-routing) examples
+do not establish calibrated thresholds for our workload. This change therefore
+preserves model policy rather than retuning it without quality evidence.
+
 ## Follow-up: prospective task evidence
 
 Implemented and installed, 2026-10-02. Added an owner-local task ledger (`trials.py`) with

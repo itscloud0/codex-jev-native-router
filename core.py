@@ -12,9 +12,11 @@ import json
 import math
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -55,6 +57,28 @@ _CODE_LIKE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|^\s*(?:def |class |
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:24]
+
+
+@contextmanager
+def _state_lock(path: Path, budget: list[float]):
+    """Share a bounded wait budget across locks; never include network time."""
+    with path.open("a+") as lock:
+        os.chmod(path, 0o600)
+        started = time.monotonic()
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = budget[0] - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise TimeoutError("state lock busy")
+                time.sleep(min(0.01, remaining))
+        budget[0] = max(0.0, budget[0] - (time.monotonic() - started))
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def cli_route_id(token: str) -> str:
@@ -239,6 +263,7 @@ class Router:
         self._failures = {policy: 0 for policy in SHADOW_POLICIES}
         self._open_until = {policy: 0.0 for policy in SHADOW_POLICIES}
         self._cache: dict[str, tuple[float, str, str, dict]] = {}
+        self._memory_lock = threading.Lock()
 
     def _config(self) -> dict:
         try:
@@ -494,21 +519,18 @@ class Router:
                 fallback = None
             return self._finalize({"model": fallback, "effort": shadow_effort if mode == "shadow" else "medium", "mode": mode, "reason": "sol_catalog_unavailable" if fallback else "cannot_route", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
         lock_path = self.state_path.with_suffix(".lock")
+        decision = {}
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             os.chmod(lock_path.parent, 0o700)
-            with lock_path.open("a+") as lock:
-                os.chmod(lock_path, 0o600)
-                lock_deadline = time.monotonic() + 0.25
-                while True:
-                    try:
-                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        if time.monotonic() >= lock_deadline:
-                            raise TimeoutError("state lock busy")
-                        time.sleep(0.01)
-                leases = self._read_leases()
+            # A fixed set of 256 stripes bounds lock-file growth. Same-session
+            # requests serialize; only hash collisions can couple distinct chats.
+            stripe_path = self.state_path.with_suffix(".route-" + session[:2] + ".lock")
+            budget = [0.25]
+            with _state_lock(stripe_path, budget):
+                with _state_lock(lock_path, budget):
+                    leases = self._read_leases()
+                    persisted = leases.get(session)
                 leases = {k: v for k, v in leases.items() if isinstance(v, dict) and time.time() - v.get("updated", 0) < 86400}
                 lease = leases.get(session)
                 if lease and lease.get("policy", "baseline") != policy:
@@ -534,19 +556,28 @@ class Router:
                     anchor_shape = decision.get("work_shape") if decision.get("reason") in ("jev", "decision_cache", "lease_hysteresis", "cache_hysteresis") else None
                     if decision.get("reason") in ("lease", "continuation_lease") and lease:
                         anchor_shape = lease.get("anchor_shape")
-                    leases[session] = {"model": decision["model"], "effort": decision["effort"], "role": decision.get("role", "sol"), "policy": policy, "turn_hash": turn_hash or (lease or {}).get("turn_hash", ""), "turns": decision.get("turns", 1), "updated": time.time(),
+                    updated_lease = {"model": decision["model"], "effort": decision["effort"], "role": decision.get("role", "sol"), "policy": policy, "turn_hash": turn_hash or (lease or {}).get("turn_hash", ""), "turns": decision.get("turns", 1), "updated": time.time(),
                                        "downgrade_role": decision.get("downgrade_role"), "downgrade_streak": decision.get("downgrade_streak", 0),
                                        "anchor_shape": anchor_shape if anchor_shape in ("mechanical", "routine", "substantive") else None,
                                        "anchor_updated": lease.get("anchor_updated", 0) if decision.get("reason") in ("lease", "continuation_lease") and lease else time.time() if anchor_shape in ("mechanical", "routine", "substantive") else 0}
-                    self._write_leases(dict(list(leases.items())[-500:]))
-                fcntl.flock(lock, fcntl.LOCK_UN)
+                    with _state_lock(lock_path, budget):
+                        latest = self._read_leases()
+                        if latest.get(session) != persisted:
+                            # A legacy process may not take a session stripe.
+                            # Never apply or persist a stale concurrent decision.
+                            raise RuntimeError("session state changed during routing")
+                        latest = {k: v for k, v in latest.items() if time.time() - v.get("updated", 0) < 86400}
+                        latest.pop(session, None)
+                        latest[session] = updated_lease
+                        self._write_leases(dict(list(latest.items())[-500:]))
                 decision.pop("role", None)
                 decision.pop("turns", None)
                 decision.pop("downgrade_role", None)
                 decision.pop("downgrade_streak", None)
                 return self._finalize(decision, start, client, payload)
         except Exception:
-            return self._finalize({"model": base["slug"], "effort": shadow_effort if mode == "shadow" else _effort("medium", base), "mode": mode, "reason": "state_error", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None}, start, client, payload)
+            spent = {key: decision[key] for key in ("jev_ms", "jev_input_tokens", "jev_output_tokens") if key in decision}
+            return self._finalize({"model": base["slug"], "effort": shadow_effort if mode == "shadow" else _effort("medium", base), "mode": mode, "reason": "state_error", "session": session, "turn_hash": turn_hash, "switched": False, "jev_ms": 0, "proposed_model": None, "proposed_effort": None, **spent}, start, client, payload)
 
     @staticmethod
     def _finalize(decision: dict, start: float, client: str, payload: dict) -> dict:
@@ -595,7 +626,9 @@ class Router:
         jev_ms = 0
         jev_usage: dict = {}
         receipt: dict = {}
-        if task and not uncertain and time.monotonic() >= self._open_until[policy]:
+        with self._memory_lock:
+            circuit_until = self._open_until[policy]
+        if task and not uncertain and time.monotonic() >= circuit_until:
             fixed_effort = (None if mode == "shadow" else payload.get("requested_effort")
                             if payload.get("requested_effort") in EFFORTS else config.get("fixed_effort")
                             if config.get("effort_policy") == "fixed" else None)
@@ -606,7 +639,8 @@ class Router:
             if fixed_effort in EFFORTS:
                 body["questions"].pop("effort", None)
             cache_key = _hash(json.dumps(body, sort_keys=True))
-            cache = self._cache.get(cache_key)
+            with self._memory_lock:
+                cache = self._cache.get(cache_key)
             if cache and time.monotonic() - cache[0] < 300:
                 candidate, candidate_effort, receipt = cache[1:]
                 reason = "decision_cache"
@@ -643,9 +677,10 @@ class Router:
                     if (candidate not in roles or RANK[candidate] < RANK[floor] or candidate_effort not in EFFORTS
                             or (policy not in ("completion_v2", "completion_v3", "completion_v4") and candidate not in body["questions"]["capability"]["criteria"])
                             or (policy == "completion_v2" and candidate_effort not in roles[candidate]["efforts"])):
-                        self._failures[policy] += 1
-                        if self._failures[policy] >= 3:
-                            self._open_until[policy] = time.monotonic() + 60
+                        with self._memory_lock:
+                            self._failures[policy] += 1
+                            if self._failures[policy] >= 3:
+                                self._open_until[policy] = time.monotonic() + 60
                         candidate, candidate_effort = None, None
                         reason = "invalid_decision"
                     else:
@@ -660,15 +695,17 @@ class Router:
                             if not shape:
                                 receipt["jev_model"] = effort_receipt.get("jev_model")
                             receipt["jev_effort_confidence"] = effort_receipt.get("jev_confidence")
-                        self._cache[cache_key] = (time.monotonic(), candidate, candidate_effort, receipt)
-                        if len(self._cache) > 256:
-                            self._cache.pop(min(self._cache, key=lambda key: self._cache[key][0]), None)
-                        self._failures[policy] = 0
+                        with self._memory_lock:
+                            self._cache[cache_key] = (time.monotonic(), candidate, candidate_effort, receipt)
+                            if len(self._cache) > 256:
+                                self._cache.pop(min(self._cache, key=lambda key: self._cache[key][0]), None)
+                            self._failures[policy] = 0
                         reason = "jev"
                 except Exception as error:
-                    self._failures[policy] += 1
-                    if self._failures[policy] >= 3:
-                        self._open_until[policy] = time.monotonic() + 60
+                    with self._memory_lock:
+                        self._failures[policy] += 1
+                        if self._failures[policy] >= 3:
+                            self._open_until[policy] = time.monotonic() + 60
                     candidate, candidate_effort = None, None
                     timed_out = isinstance(error, TimeoutError) or (
                         isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError))
@@ -682,7 +719,7 @@ class Router:
                 proposed_effort = candidate_effort
         elif uncertain:
             reason = "privacy_fallback"
-        elif self._open_until[policy] > time.monotonic():
+        elif circuit_until > time.monotonic():
             reason = "circuit_open"
         # Preserve the stronger lease through failures. V4 treats a long, hot
         # context as switching cost, rather than excluding smaller models.
