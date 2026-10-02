@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 import threading
 
-from rpc_adapter import Adapter, _relay
+from rpc_adapter import Adapter, _relay, native_server_command
 
 
 def run(native: Path, root: Path, command: list[str]) -> int:
@@ -25,6 +25,7 @@ def run(native: Path, root: Path, command: list[str]) -> int:
             or listen not in (None, "stdio://") or "--listen-tcp" in command):
         os.execv(str(native), [str(native), *command])
 
+    command = native_server_command(root, command)
     native_input, adapter_output = os.pipe()
     adapter_input, native_output = os.pipe()
     # macOS may abort a Python child between fork and exec when Objective-C

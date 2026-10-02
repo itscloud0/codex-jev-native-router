@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 
-from rpc_adapter import Adapter
+from rpc_adapter import Adapter, native_server_command
 from manage import cli_catalog_path
 
 
@@ -171,8 +171,10 @@ def _serve_connection(connection: socket.socket, stream, root: Path, native: Pat
                       initial_alias: str | None = None) -> None:
     _debug("connected")
     with connection, stream:
-        child = subprocess.Popen([str(native), "-c", "model_catalog_json=" + json.dumps(str(cli_catalog_path(root, "models.json"))),
-                                  "app-server", "--listen", "stdio://"],
+        command = native_server_command(root,
+                    ["-c", "model_catalog_json=" + json.dumps(str(cli_catalog_path(root, "models.json"))),
+                     "app-server", "--listen", "stdio://"], cli_catalog_path(root, "native-models.json"))
+        child = subprocess.Popen([str(native), *command],
                                  # Only the foreground TUI owns the terminal. Backend stderr may
                                  # contain raw command text and corrupt the input editor.
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)

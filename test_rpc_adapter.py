@@ -58,6 +58,40 @@ class AdapterTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_missing_model_uses_launch_intent_and_preserves_local_images(self):
+        cli = rpc_adapter.Adapter(self.root, router=self.router, client='cli', initial_alias='jev-shadow')
+        started = json.loads(cli.client(request('thread/start', {}, 90)))
+        self.assertEqual(started['params']['model'], 'gpt-6-sol')
+        cli.server(response(90, {'thread': {'id': 'images'}, 'model': 'gpt-6-sol'}))
+        items = [{'type': 'text', 'text': 'Inspect images'},
+                 *[{'type': 'localImage', 'path': '/tmp/test-image-'+str(i)+'.png'} for i in range(4)]]
+        sent = json.loads(cli.client(request('turn/start', {'threadId': 'images', 'input': items, 'effort': 'high'}, 91)))
+        self.assertNotIn(sent['params']['model'], core.ALIASES)
+        self.assertEqual(sent['params']['input'], items)
+        self.assertEqual(self.router.calls[-1][0]['shadow_executor_effort'], 'high')
+
+    def test_global_alias_is_adapter_intent_not_native_server_default(self):
+        config = self.root / 'codex.toml'
+        config.write_text('model = "jev-shadow"\n')
+        (self.root / 'manifest.json').write_text(json.dumps({'config_path': str(config)}))
+        (self.root / 'config.json').write_text(json.dumps({'fallback_model': 'gpt-6.1-sol'}))
+        command = ['-c', 'model_catalog_json="/tmp/catalog"', 'app-server']
+        safe = rpc_adapter.native_server_command(self.root, command)
+        self.assertEqual(safe[-3:], ['-c', 'model="gpt-6.1-sol"', 'app-server'])
+        self.assertEqual(command, ['-c', 'model_catalog_json="/tmp/catalog"', 'app-server'])
+        adapter = rpc_adapter.Adapter(self.root, router=self.router)
+        self.assertEqual(json.loads(adapter.client(request('thread/start', {})))['params']['model'], 'gpt-6-sol')
+        concrete = ['-c', 'model="gpt-6-luna"', 'app-server']
+        self.assertEqual(rpc_adapter.native_server_command(self.root, concrete), concrete)
+        native_url = ['-c', 'openai_base_url="https://chatgpt.com/backend-api/codex"', 'app-server']
+        self.assertIn('model="gpt-6.1-sol"', rpc_adapter.native_server_command(self.root, native_url))
+        custom_url = ['-c', 'openai_base_url="https://custom.example"', 'app-server']
+        self.assertEqual(rpc_adapter.native_server_command(self.root, custom_url), custom_url)
+        profile = ['-c', 'profile="custom"', 'app-server']
+        self.assertEqual(rpc_adapter.native_server_command(self.root, profile), profile)
+        config.write_text('model = "jev-shadow"\nmodel_provider = "custom"\n')
+        self.assertEqual(rpc_adapter.native_server_command(self.root, command), command)
+
     def test_config_alias_cannot_override_routed_native_model(self):
         sent = json.loads(self.adapter.client(request('turn/start', {
             'threadId': 'config-shadow', 'model': 'jev-shadow', 'effort': 'high',

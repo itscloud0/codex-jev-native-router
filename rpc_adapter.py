@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,41 @@ def _custom_provider(params: dict) -> bool:
         if any(item.get(key) for key in ("profile", "openai_base_url", "model_catalog_json")):
             return True
     return False
+
+
+def configured_alias(root: Path) -> str | None:
+    """Read only native model intent; never treat a custom provider as our executor."""
+    try:
+        manifest = json.loads((root / "manifest.json").read_text())
+        config = tomllib.loads(Path(manifest["config_path"]).read_text())
+        if config.get("model_provider", "openai") != "openai" or config.get("openai_base_url") not in (
+                None, "https://chatgpt.com/backend-api/codex"):
+            return None
+        return _alias(config.get("model"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def native_server_command(root: Path, command: list[str], catalog_path: Path | None = None) -> list[str]:
+    """Keep native defaults concrete; synthetic mode lives in the RPC adapter."""
+    if not configured_alias(root):
+        return command
+    index = 0
+    while index < len(command) and command[index] in ("-c", "--config"):
+        if index + 1 >= len(command):
+            return command
+        key, _, value = command[index + 1].partition("=")
+        value = value.strip().strip('"\'')
+        if key == "profile" or (key == "model_provider" and value != "openai") or (
+                key == "openai_base_url" and value != "https://chatgpt.com/backend-api/codex"):
+            return command
+        if key == "model" and not _alias(value):
+            return command
+        index += 2
+    if index >= len(command) or command[index] != "app-server":
+        return command
+    sol = Adapter(root, catalog_path=catalog_path)._sol()
+    return [*command[:index], "-c", "model=" + json.dumps(sol), *command[index:]]
 
 
 class IntentStore:
@@ -171,6 +207,7 @@ class Adapter:
         self.store = store or IntentStore(root / "state/desktop-intent.json")
         self.client_name = client if client in ("desktop", "cli") else "desktop"
         self.initial_alias = initial_alias if self.client_name == "cli" and initial_alias in ALIASES else None
+        self.default_alias = configured_alias(root)
         self.resume_pending: set[str] = set()
         self.pending: dict[str, dict] = {}
         self.active: set[str] = set()
@@ -353,6 +390,8 @@ class Adapter:
         # Collaboration settings win in native Codex. Any concrete selection is manual.
         explicit = config_model or (collab_model if isinstance(collab_model, str) else top_model if isinstance(top_model, str) else None)
         pending_manual = bool(self.pending_override.pop(thread_id, False)) if method == "turn/start" and thread_id else False
+        if explicit is None and method == "thread/start":
+            explicit = self.initial_alias or self.default_alias
         if method == "thread/resume" and self.initial_alias:
             # CLI launch intent wins over the concrete model saved in the old
             # thread. Native Codex still restores its history and actual model.
@@ -381,6 +420,8 @@ class Adapter:
             effort = effort if isinstance(effort, str) else params.get("effort")
             self._remember(self.actual, thread_id, (explicit, effort if isinstance(effort, str) else "medium"))
         alias = _alias(explicit) or (saved.get("alias") if saved and explicit is None else None)
+        if method == "turn/start" and explicit is None and not saved:
+            alias = self.initial_alias or self.default_alias
         if _custom_provider(params):
             alias = None
             if thread_id and saved:

@@ -185,3 +185,9 @@ Installed code is loaded at process start. Exit and reopen only the affected CLI
 The foreground native TUI must be the sole owner of terminal output. The Effortlane CLI bridge discards the background app-server's raw stderr instead of inheriting the terminal; structured protocol responses still flow to the TUI. This avoids rendering corruption and avoids storing raw command/source fragments in an extra router log. CLI adapter fallback diagnostics stay off the active terminal, and initial connection timeout diagnostics are deferred until the foreground process exits. Explicit `JEV_BRIDGE_DEBUG=1` still prints protocol method names and is intended only for troubleshooting.
 
 Reopen the affected CLI process to load the fix. A tool's patch-validation or command-policy failure is a separate issue: suppressing raw stderr does not make a rejected operation succeed.
+
+### Native defaults and requests without a model
+
+When the global OpenAI Codex model is an Effortlane alias, CLI and Desktop app-server startup now explicitly use the catalog's concrete Sol as the native default. The adapter retains the logical mode and recognizes new threads/turns that omit a model. This prevents an inherited synthetic default from reaching native execution. Explicit concrete models and custom providers/endpoints/profiles remain unchanged. No global auth or Codex configuration is rewritten.
+
+Local image items pass through unchanged. The remote native TUI may refuse to restore a failed prompt containing local image paths; that recovery warning is a native safety restriction, not proof that image transfer failed. After a failed multimodal turn, reattach images rather than assuming the editor restored them. Restart the owning app-server to load startup changes; restarting only a frontend attached to an existing Desktop backend is insufficient.
