@@ -178,6 +178,12 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/health", headers={"Host": "example.com"})[0], 403)
         self.assertFalse(FakeConnection.calls)
 
+    def test_server_header_uses_effortlane_brand(self):
+        status, headers, _ = self.request("GET", "/health")
+        self.assertEqual(status, 200)
+        self.assertIn("Effortlane", headers["Server"])
+        self.assertNotIn("jev-router", headers["Server"])
+
     def test_native_zstd_alias_body_is_bounded_and_rewritten(self):
         if transport.zstd is None:
             self.skipTest("stdlib zstd requires Python 3.14")

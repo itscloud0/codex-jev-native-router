@@ -1,5 +1,7 @@
 import io
 import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import cli_chat
 
@@ -37,6 +39,27 @@ class ClientEventTests(unittest.TestCase):
         self.assertTrue(cli_chat.MODELS.fullmatch("jev-auto"))
         self.assertTrue(cli_chat.MODELS.fullmatch("gpt-6-sol"))
         self.assertFalse(cli_chat.MODELS.fullmatch("bad;command"))
+
+    def test_turn_displays_public_alias_when_executor_is_unavailable(self):
+        self.client.root = Path("/missing")
+        self.client.thread_id = "thread"
+        self.client.model = "jev-auto"
+        self.client.request = Mock(return_value={})
+        self.client._read = Mock(return_value={"method": "turn/completed", "params": {
+            "turn": {"status": "completed"}}})
+        self.assertEqual(self.client.turn("hello"), "completed")
+        self.assertEqual(self.client.stderr.getvalue(), "[Effortlane Auto]\n")
+        self.assertNotIn("jev-auto", self.client.stderr.getvalue())
+
+    def test_public_model_alias_is_normalized_before_client_creation(self):
+        client = Mock()
+        client.close = Mock()
+        client.initialize = Mock()
+        with (patch.object(cli_chat, "CodexClient", return_value=client) as constructor,
+              patch("sys.stdin", io.StringIO("")),
+              patch("sys.stderr", io.StringIO())):
+            self.assertEqual(cli_chat.run(["--model", "effortlane-shadow", "--once"], Path("/tmp")), 0)
+        self.assertEqual(constructor.call_args.args[1], "jev-shadow")
 
     def test_last_resumes_thread_before_turn(self):
         thread = "01a0e77c-b9c3-7961-8201-79edce3ffc49"

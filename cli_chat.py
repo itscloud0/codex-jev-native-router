@@ -1,4 +1,4 @@
-"""Small terminal client for native Codex app-server with pre-turn Jev routing."""
+"""Small terminal client for native Codex app-server with pre-turn Effortlane routing."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,10 @@ import time
 MODELS = re.compile(r"(?:jev-(?:auto|shadow)|gpt-\d+(?:\.\d+)*-[a-z0-9]+)\Z")
 THREADS = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 MAX_FRAME = 8 * 1024 * 1024
+
+
+def display_model(model: str) -> str:
+    return {"jev-auto": "Effortlane Auto", "jev-shadow": "Effortlane Shadow"}.get(model, model)
 
 
 class CodexClient:
@@ -187,15 +191,15 @@ class CodexClient:
         self.request("turn/start", {"threadId": self.thread_id, "model": self.model,
                                     "input": [{"type": "text", "text": prompt}]}, timeout=60)
         # The adapter has already selected and logged the concrete executor.
+        display = display_model(self.model)
         try:
             from rpc_adapter import IntentStore
             entry = IntentStore(self.root / "state/desktop-intent.json").get(self.thread_id)
             if entry and entry.get("alias") == self.model:
-                print(f"[{entry.get('actual', 'Codex')}/{entry.get('effort', '?')}]", file=self.stderr)
-            else:
-                print(f"[{self.model}]", file=self.stderr)
+                display = f"{entry.get('actual', 'Codex')}/{entry.get('effort', '?')}"
         except Exception:
             pass
+        print(f"[{display}]", file=self.stderr)
         while not self.turn_done:
             self._event(self._read())
         return self.turn_status
@@ -206,7 +210,8 @@ def run(argv: list[str], root: Path) -> int:
     previous = parser.add_mutually_exclusive_group()
     previous.add_argument("--resume", metavar="THREAD_UUID")
     previous.add_argument("--last", action="store_true", help="resume the most recently updated thread in this directory")
-    parser.add_argument("--model", default="jev-auto")
+    parser.add_argument("--model", metavar="MODEL", default="jev-auto",
+                        help="effortlane-auto, effortlane-shadow, or a concrete GPT model")
     parser.add_argument("--once", action="store_true", help="read one prompt from stdin, then exit")
     from manage import brand_cli_args
     args = parser.parse_args(brand_cli_args(argv))
@@ -230,7 +235,7 @@ def run(argv: list[str], root: Path) -> int:
                 model = {"effortlane-auto": "jev-auto", "effortlane-shadow": "jev-shadow"}.get(model, model)
                 if MODELS.fullmatch(model):
                     client.model = model
-                    print("model " + {"jev-auto": "effortlane-auto", "jev-shadow": "effortlane-shadow"}.get(model, model), file=sys.stderr)
+                    print("model " + display_model(model), file=sys.stderr)
                 else:
                     print("invalid model", file=sys.stderr)
                 continue

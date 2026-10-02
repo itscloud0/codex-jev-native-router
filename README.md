@@ -44,12 +44,12 @@ Already installed? See [update and recovery](docs/OPERATIONS.md#report). The pub
 
 The picker displays **Effortlane Auto / Effortlane Shadow**. Internal IDs (`jev-auto`, `jev-shadow`) and `--effortlane-auto` / `--effortlane-shadow` flags remain compatible with existing sessions and scripts.
 
-### Pick how much control to give Jev
+### Choose an Effortlane mode
 
 | Selection | Actual executor | Model and effort decision |
 |---|---|---|
-| **Effortlane Auto** | An allowed native Codex model | Jev proposes both; local policy validates the decision |
-| **Effortlane Shadow** | Latest Sol exposed by that client | Your selected effort executes; Jev independently records a proposal |
+| **Effortlane Auto** | An allowed native Codex model | Effortlane selects both using the decision service and local policy |
+| **Effortlane Shadow** | Latest Sol exposed by that client | Your selected effort executes; Effortlane independently records a proposal |
 | **Concrete model** | Your selected model | Manual model choice bypasses automatic routing |
 
 ```sh

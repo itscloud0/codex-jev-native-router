@@ -14,7 +14,7 @@ from rpc_adapter import Adapter, _relay, native_server_command
 
 def run(native: Path, root: Path, command: list[str]) -> int:
     if not native.is_absolute() or not native.is_file() or not os.access(native, os.X_OK):
-        print(f"Jev Desktop: native Codex missing or not executable: {native}", file=sys.stderr)
+        print(f"Effortlane Desktop: native Codex missing or not executable: {native}", file=sys.stderr)
         return 127
     listen = next((command[i + 1] for i, arg in enumerate(command[:-1]) if arg == "--listen"), None)
     listen = next((arg.split("=", 1)[1] for arg in command if arg.startswith("--listen=")), listen)

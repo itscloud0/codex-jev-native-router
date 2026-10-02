@@ -33,7 +33,7 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 def _debug(event: str) -> None:
     if os.environ.get("JEV_BRIDGE_DEBUG") == "1":
-        print(f"[jev-bridge] {event}", file=sys.stderr, flush=True)
+        print(f"[Effortlane bridge] {event}", file=sys.stderr, flush=True)
 
 
 def _read_exact(stream, count: int) -> bytes:
@@ -139,12 +139,12 @@ def _accept_authorized(listener: socket.socket, token: str, timeout: float = 20,
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("Codex did not connect to the Jev bridge")
+            raise TimeoutError("Codex did not connect to the Effortlane bridge")
         listener.settimeout(remaining)
         try:
             connection, address = listener.accept()
         except socket.timeout as exc:
-            raise TimeoutError("Codex did not connect to the Jev bridge") from exc
+            raise TimeoutError("Codex did not connect to the Effortlane bridge") from exc
         _debug("accepted")
         if progress is not None:
             progress["stage"] = "reading WebSocket handshake"
@@ -346,7 +346,7 @@ def run(root: Path, native: Path, args: list[str]) -> int:
                                       args=(listener, root, native, token, connected, ready, progress, stopped, initial_alias), daemon=True)
             bridge.start()
             if not ready.wait(timeout=5):
-                raise TimeoutError("Jev bridge accept thread did not start")
+                raise TimeoutError("Effortlane bridge accept thread did not start")
             child = subprocess.Popen([str(native), "--remote", f"ws://127.0.0.1:{port}",
                                       "--remote-auth-token-env", "JEV_CODEX_BRIDGE_TOKEN", *args],
                                      stdin=None, stdout=None, stderr=None,
@@ -354,11 +354,11 @@ def run(root: Path, native: Path, args: list[str]) -> int:
             code = child.wait()
             stopped.set()
             if code and not connected.is_set():
-                print(f"Jev TUI bridge: Codex exited before authentication; last stage: {progress['stage']}.",
+                print(f"Effortlane TUI bridge: Codex exited before authentication; last stage: {progress['stage']}.",
                       file=sys.stderr, flush=True)
             return code
     except (OSError, ValueError) as exc:
-        print(f"Jev TUI bridge unavailable: {exc}; starting native Sol.", file=sys.stderr)
+        print(f"Effortlane TUI bridge unavailable: {exc}; starting native Sol.", file=sys.stderr)
         try:
             fallback = json.loads((root / "config.json").read_text()).get("fallback_model")
         except (OSError, ValueError, AttributeError):

@@ -288,7 +288,7 @@ class Router:
             ENDPOINT,
             data=json.dumps(body, separators=(",", ":")).encode(),
             headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
-                     "User-Agent": "JevCodexRouter/1.0"},
+                     "User-Agent": "Effortlane/1.0"},
             method="POST",
         )
         class NoRedirect(urllib.request.HTTPRedirectHandler):

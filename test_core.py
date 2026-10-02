@@ -54,7 +54,7 @@ class RouterTest(unittest.TestCase):
             with mock.patch("core.urllib.request.build_opener", return_value=opener):
                 Router._call_jev({"model": "jev-latest", "state": {}, "questions": {}}, 2, key_path)
             request = opener.open.call_args.args[0]
-            self.assertEqual(request.get_header("User-agent"), "JevCodexRouter/1.0")
+            self.assertEqual(request.get_header("User-agent"), "Effortlane/1.0")
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

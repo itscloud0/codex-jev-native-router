@@ -37,7 +37,9 @@ class DesktopBootstrapTests(unittest.TestCase):
                                      "--native", str(missing), "--root", directory, "--", "app-server"],
                                     capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 127)
+            self.assertIn(b"Effortlane Desktop", result.stderr)
             self.assertIn(b"native Codex missing or not executable", result.stderr)
+            self.assertNotIn(b"Jev", result.stderr)
 
 
 if __name__ == "__main__":

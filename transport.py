@@ -214,7 +214,7 @@ class RouterServer(ThreadingHTTPServer):
 
 class RouterHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "jev-router"
+    server_version = "Effortlane"
     sys_version = ""
 
     def setup(self) -> None:

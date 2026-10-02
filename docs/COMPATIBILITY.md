@@ -16,4 +16,6 @@ codex --effortlane-off
 
 Existing `jev-codex`, `--jev-auto`, `--jev-shadow`, and `--jev-off` remain compatible. Internal model IDs `jev-auto` and `jev-shadow` are preserved to resume existing threads. Installed files, credential locations, and LaunchAgent labels keep their legacy names (`~/.local/share/jev-codex-router`, `~/.config/jev-codex-router`, `com.local.jev-codex-router`). This avoids disruptive state or credential migration. No logout or session reset is required. These identifiers are compatibility details, not the public brand.
 
+Startup errors, bridge diagnostics, and picker labels use Effortlane. Raw diagnostic JSON and old native session metadata can still contain the compatibility IDs above. Jev appears in provider attribution, decision-service latency/cost metrics, and third-party references; it is not the product name. Already-running clients retain their loaded code and catalog until reopened.
+
 New installations create both public and legacy management links. Rollback removes only links owned by the installer and preserves foreign replacements.

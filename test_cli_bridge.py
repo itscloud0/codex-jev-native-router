@@ -19,6 +19,14 @@ def client_frame(data: bytes, opcode: int = 1, fin: bool = True) -> bytes:
 
 
 class WebSocketTests(unittest.TestCase):
+    def test_debug_prefix_uses_effortlane_brand(self):
+        output = io.StringIO()
+        with (patch.dict("os.environ", {"JEV_BRIDGE_DEBUG": "1"}),
+              redirect_stderr(output)):
+            cli_bridge._debug("connected")
+        self.assertEqual(output.getvalue(), "[Effortlane bridge] connected\n")
+        self.assertNotIn("Jev", output.getvalue())
+
     def test_background_server_cannot_write_into_foreground_terminal(self):
         child = Mock(stdin=io.BytesIO(), stdout=io.BytesIO())
         connection = MagicMock()
@@ -133,7 +141,9 @@ class WebSocketTests(unittest.TestCase):
         self.assertIsNone(popen.call_args.kwargs["stderr"])
         direct.assert_not_called()
         self.assertEqual(aliases, ["jev-auto"])
+        self.assertIn("Effortlane TUI bridge: Codex exited before authentication", output.getvalue())
         self.assertIn("last stage: starting accept thread", output.getvalue())
+        self.assertNotIn("Jev", output.getvalue())
 
     def test_exit_after_connection_does_not_restart_native_tui(self):
         def mark_connected(*args, **kwargs):

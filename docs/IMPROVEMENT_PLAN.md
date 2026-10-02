@@ -2,6 +2,8 @@
 
 ## Independent routing under concurrency
 
+Status: implemented, tested, and installed locally on 2026-10-02.
+
 Goal: a slow Jev request in one chat must not force an unrelated chat to Sol.
 Reproduced on 2026-10-02 with a blocked synthetic Jev response: the second chat
 returns `state_error` after the 250 ms global lock wait. A bounded sample of 160
@@ -32,6 +34,18 @@ bounded state and batched independent questions. Its
 [confidence routing](https://docs.typesafe.ai/patterns/confidence-routing) examples
 do not establish calibrated thresholds for our workload. This change therefore
 preserves model policy rather than retuning it without quality evidence.
+
+The accompanying branding cleanup uses Effortlane in startup/debug messages,
+diagnostic alias labels, HTTP client/server identification, and public command
+examples. Legacy IDs and file locations remain compatible. Both installed picker
+catalogs already had Effortlane labels and descriptions; neither needed rewriting.
+Final validation: 261 full-suite tests, 38 fixture tests against installed modules,
+runtime compilation, and diff checks passed. Installation backed up all five
+changed runtime modules before atomic replacement; configuration, manifest,
+catalogs, and Desktop wrapper hashes stayed unchanged. All eight static doctor
+checks passed and native bypass reported Codex 0.160.0. No running clients were
+restarted and no live Desktop tool validation or savings claim follows from this
+release. Existing clients must reload the updated modules before using the fix.
 
 ## Follow-up: prospective task evidence
 
