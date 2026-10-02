@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
 import shutil
@@ -37,6 +38,7 @@ SETTINGS_NAME = "claude-shadow-settings.json"
 SETTINGS_HASH_NAME = "claude-shadow-settings.sha256"
 OUTCOMES = frozenset(("ok", "invalid", "timeout", "error", "privacy_filtered", "no_candidates", "missing_key_config"))
 HOOK_WALL_SECONDS = 3.0
+PASTED_CONTENT_MARKER = re.compile(r"<\s*/?\s*pasted_content\b", re.IGNORECASE)
 
 
 def _load_config(root: Path) -> dict[str, Any]:
@@ -136,6 +138,12 @@ def shadow(root: Path, event: dict[str, Any], jev_client: Callable[[dict, float,
     """Observe one UserPromptSubmit event. All errors deliberately fail open."""
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or len(prompt.encode("utf-8", "replace")) > MAX_EVENT_BYTES:
+        _status(root, "privacy_filtered", event)
+        return
+    # Claude wraps pasted input in this marker. Reject the entire event before
+    # sanitizing, loading config, or resolving the local key path; malformed
+    # and incomplete wrappers are treated exactly like complete ones.
+    if PASTED_CONTENT_MARKER.search(prompt):
         _status(root, "privacy_filtered", event)
         return
     task, uncertain = sanitize_task(prompt)

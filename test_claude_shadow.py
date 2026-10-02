@@ -59,6 +59,28 @@ class ClaudeShadowTest(unittest.TestCase):
         self.assertFalse(client.called)
         self.assertEqual([row["outcome"] for row in self.rows()], ["privacy_filtered", "privacy_filtered"])
 
+    def test_pasted_content_never_routes_or_loads_key_configuration(self):
+        client = mock.Mock(side_effect=AssertionError("must not call"))
+        pasted_prompts = (
+            "<pasted_content>Benign prose to summarize.</pasted_content>",
+            "<PASTED_CONTENT source=clipboard>unknown_secret=unrecognized-value</PASTED_CONTENT>",
+            "<pasted_content>def handler(request):\n    return request.value",
+            "Please fix this <pasted_content source=clipboard",
+            "<PaStEd_CoNtEnT label=\"буфер ✓\">Привет, мир</pAsTeD_cOnTeNt>",
+            "Please remove </pasted_content> from this example",
+        )
+        with mock.patch("claude_shadow._load_config", side_effect=AssertionError("must not load config or key path")):
+            for prompt in pasted_prompts:
+                self.invoke(prompt, client)
+        self.assertFalse(client.called)
+        self.assertEqual([row["outcome"] for row in self.rows()], ["privacy_filtered"] * len(pasted_prompts))
+
+    def test_ordinary_short_prompt_still_routes(self):
+        client = mock.Mock(return_value={"answers": {"route": {"choice": "haiku:default"}}})
+        self.invoke("Fix the parser", client)
+        self.assertTrue(client.called)
+        self.assertEqual(self.rows()[0]["outcome"], "ok")
+
     def test_invalid_timeout_and_oversized_events_are_silent(self):
         self.invoke("Please implement this change", lambda *_: {"answers": {"route": {"choice": "gpt:high"}}})
         self.invoke("Please implement this change", lambda *_: (_ for _ in ()).throw(urllib.error.URLError(TimeoutError())))

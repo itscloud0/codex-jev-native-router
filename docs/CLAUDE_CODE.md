@@ -14,7 +14,10 @@ among `haiku`, `sonnet`, and `opus`; it never applies that proposal.
 This is Shadow-only: there is no model override, no account-availability claim,
 and no Claude quota or savings telemetry. Network errors, timeouts,
 malformed events, and unavailable Jev fail open. The adapter does not
-read transcripts. It accepts no `-p`/`--print` mode in this first release.
+read transcripts. Prompts containing Claude's `<pasted_content ...>` wrapper,
+including malformed or incomplete wrappers, are recorded only as
+`privacy_filtered` and never route remotely or resolve the local key path. It
+accepts no `-p`/`--print` mode in this first release.
 The Jev socket timeout is two seconds and the hook process has a separate,
 enforced three-second POSIX wall-time limit; the Claude async-hook timeout field
 is not relied on for that deadline.
