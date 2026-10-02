@@ -1,168 +1,158 @@
 <div align="center">
 
-<img src="assets/router-banner.png" alt="Effortlane — Jev decides. Native Codex executes." width="1200">
+<img src="assets/router-banner.png" alt="Effortlane — model and reasoning-effort routing for coding agents" width="1200">
 
 # Effortlane
 
-**Model and reasoning-effort routing for coding agents. Powered by Jev.**
+**Choose model and reasoning effort. Keep your native coding agent.**
 
-Current integration: Codex on macOS. Keep your ChatGPT login and native executor.
+Open-source LLM routing for Codex on macOS, with Shadow evaluation and local usage telemetry.
 
 [![Tests](https://img.shields.io/github/actions/workflow/status/itscloud0/effortlane/tests.yml?branch=main&style=flat-square&label=tests)](https://github.com/itscloud0/effortlane/actions/workflows/tests.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-94a3b8?style=flat-square)](LICENSE)
 ![macOS](https://img.shields.io/badge/platform-macOS-94a3b8?style=flat-square)
 ![Experimental](https://img.shields.io/badge/status-experimental-fbbf24?style=flat-square)
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Evidence](#what-we-have-measured) · [Configuration](#configuration) · [Documentation](#documentation)
+[**Try Shadow →**](#quick-start) · [See the evidence](#what-we-have-measured) · [How it works](#how-it-works) · [Get help](#help-build-effortlane)
 
 </div>
 
-## Why this exists
+## What is Effortlane?
 
-A cheaper inference is not necessarily a cheaper completed task. Retries, rework, context reconstruction, and cold caches can erase the saving.
+Effortlane is a local model and reasoning-effort router for coding agents. It selects from your authenticated Codex model catalog before a user turn, preserves native ChatGPT authentication, and records routing evidence locally. In **Shadow mode**, you keep the real executor and effort while Effortlane records what it would recommend.
 
-This project explores **less Pro allowance used per correctly completed task**. Jev makes a small routing decision; your authenticated Codex model does the work with its canonical context. Switching happens between user turns, not after every thought or tool call.
+The goal: **less subscription allowance per correctly completed task**. A cheap call that causes retries or rework is not a saving.
+
+| What you get | Why it matters |
+|---|---|
+| Model **and** effort selection | Adjust reasoning depth as well as model capability |
+| Shadow before Auto | Inspect recommendations before letting them change execution |
+| Decisions between turns | Keep one executor through a turn's thoughts and tool calls |
+| Native login and context | Continue using your existing Codex account and full executor context |
+| Local evidence and recovery | Inspect routes, cache counters and failures; return to native Codex |
 
 > [!IMPORTANT]
-> **Experimental, macOS-only. Pro allowance savings and engineering-quality improvements are not yet proven.** CLI routing is implemented. Desktop integration is opt-in and relies on an undocumented app override; revalidate built-in tools after updates. Coding execution uses native ChatGPT/Codex authentication. Jev decisions are a separate vendor service and may have their own cost.
+> **Experimental. Subscription savings and quality improvements are not yet proven.** Codex CLI on macOS is implemented. Desktop is opt-in and needs compatibility checks after updates. The external decision service may have its own cost.
 
 ## Quick start
 
-Requirements: macOS, Python 3.11+, native Codex installed and signed in, and a TypeSafe/Jev key.
+You need **macOS, Python 3.11+, native Codex installed and signed in, and a TypeSafe/Jev API key**. No per-project setup or Python dependency install is required.
 
 ```sh
 git clone https://github.com/itscloud0/effortlane.git
 cd effortlane
 python3 bootstrap.py
-effortlane doctor
-codex
+~/.local/bin/effortlane doctor
+~/.local/bin/codex --effortlane-shadow
 ```
 
-The installer asks for the Jev key with hidden input, backs up existing Codex configuration, and installs at user level. It never asks you to paste a key into a GitHub issue. No per-repository setup is required. If `~/.local/bin` is not first on your `PATH`, the installer prints the remaining shell step.
+The installer asks for the decision-service key with hidden input, backs up Codex configuration, and installs under your user account. It preserves unrelated settings and native login. Follow any PATH instruction it prints to use the short commands below.
 
-Already installed? See [update and recovery](docs/OPERATIONS.md#report). The public command is `effortlane`; legacy command aliases and installation paths remain compatible.
+**This example explicitly starts Shadow.** Fresh installation otherwise defaults the CLI wrapper to Auto. Existing concrete-model choices remain manual overrides.
 
-The picker displays **Effortlane Auto / Effortlane Shadow**. Internal IDs (`jev-auto`, `jev-shadow`) and `--effortlane-auto` / `--effortlane-shadow` flags remain compatible with existing sessions and scripts.
+### Choose your mode
 
-### Choose an Effortlane mode
-
-| Selection | Actual executor | Model and effort decision |
+| Mode | What actually runs | Who chooses effort? |
 |---|---|---|
-| **Effortlane Auto** | An allowed native Codex model | Effortlane selects both using the decision service and local policy |
-| **Effortlane Shadow** | Latest Sol exposed by that client | Your selected effort executes; Effortlane independently records a proposal |
-| **Concrete model** | Your selected model | Manual model choice bypasses automatic routing |
+| **Effortlane Shadow** | Latest Sol in that client's account catalog | You; Effortlane independently records a proposal |
+| **Effortlane Auto** | An allowed native Codex model | Effortlane, subject to local policy |
+| **Concrete model** | The model you select | You; automatic routing is bypassed |
 
 ```sh
-codex --effortlane-shadow             # observe decisions without applying them
+codex --effortlane-shadow             # evaluate proposals without applying them
+codex --effortlane-auto               # apply model and effort routing
 codex exec --effortlane-shadow "Explain this module"
-effortlane status
-effortlane trace THREAD_UUID
+effortlane metrics --hours 168        # inspect coverage, cache and latency
+effortlane trace THREAD_UUID          # inspect one thread's routing evidence
 ```
 
-Desktop stays native until you explicitly run `effortlane desktop-enable` and restart the app. `effortlane desktop-safe` restores native Desktop if compatibility regresses; restart afterward. [Desktop compatibility details](docs/OPERATIONS.md#limits).
-
-## How it works
-
-<img src="assets/architecture.png" alt="A bounded sanitized task dossier goes to Jev. Local policy validates model and effort. Native Codex receives the full executor context; only metadata is logged." width="1200">
-
-1. **Describe the task, briefly.** A bounded, sanitized routing dossier omits repository source, complete conversations, tool output, and credential-like values.
-2. **Ask Jev.** Typed choices propose work shape and reasoning effort.
-3. **Apply local policy.** Respect manual choices, account model availability, allowlists, risk floors, and route continuity. A conservative cache guard delays some downgrades; capability upgrades are immediate.
-4. **Execute natively.** Codex retains its canonical context and ChatGPT login. The coding model is not silently moved to a separately billed OpenAI or OpenRouter API.
-5. **Measure metadata.** Record model, effort, available token/cache counters, latency, and route linkage. Full prompts and source are not logged by default.
-
-The router selects an executor; it does **not** autonomously split tasks or spawn subagents. Native Codex decides delegation. There is no background repository indexer or always-running planning swarm.
+**Desktop stays native by default.** To opt in, run `effortlane desktop-enable` and restart the app. Select Effortlane Auto or Effortlane Shadow in its picker. [Compatibility and recovery](docs/OPERATIONS.md#limits) · [Legacy identifier compatibility](docs/COMPATIBILITY.md).
 
 ## What we have measured
 
-**Dated local observation · October 2, 2026, 18:18 UTC · one Mac · not a benchmark.**
+**One Mac · September 29–October 2, 2026 · snapshot at 18:18 UTC · includes diagnostic interactions.**
 
-| Observation | Result | What it establishes |
-|---|---:|---|
-| Shadow routing decisions | 360 | Observed September 29–October 2; includes diagnostic interactions |
-| Exactly linked executor usage records | 350 | Ten decisions lack a linked usage record |
-| Actual Shadow executor | GPT-6.1 Sol | User-selected effort: low 7 · medium 241 · high 73 · xhigh 39 |
-| Jev-backed model proposals | 286 Sol · 26 Luna | 312 proposals, including 16 held by cache hysteresis |
-| Proposed effort | low 48 · medium 217 · high 47 | Recommendations were not executed in Shadow |
-| Effort versus actual selection | lower 114 · same 163 · higher 35 | 36.5% proposed lower effort; **not 36.5% savings** |
-| Observed cached-input ratio | 94.9% | Cache detail exists for 342 of 350 linked records; not a router-attributable benefit |
-| Median measured Jev latency | 361 ms | Additional decision overhead |
+<img src="assets/shadow-evidence.svg" alt="Of 312 Shadow proposals, 286 selected Sol and 26 Luna. Effort recommendations were lower in 114 cases, unchanged in 163, and higher in 35. Proposals were not executed; savings are unproven." width="1200">
 
-The remaining 48 decisions were 41 privacy fallbacks, one timeout, and six leases. They are not counted as new Jev-backed proposals. Sixteen Luna proposals were held by the cache guard.
+The real Shadow executor was **GPT-6.1 Sol at the user-selected effort**. Of 360 decisions, 312 had a proposal; the other 48 were privacy fallbacks, a timeout, or lease reuse. Sixteen Luna proposals were held by the cache guard.
 
-The account-wide weekly Pro meter rose from **10% to 43%** over approximately 49.5 elapsed hours covered by quota snapshots. Other chats and modes shared that allowance. Reset timestamps drifted by several seconds between clients, and some intermediate percentages decreased; snapshot groups must not be added together. This is **observed account consumption, not demonstrated router savings**, and it cannot be converted into a fraction of the $200 monthly subscription fee.
+| Observed | What it means |
+|---|---|
+| 114 / 312 proposals suggested lower effort | A hypothesis to test; **not 36.5% savings** |
+| 350 linked usage records | Linkage exists; historical records do not cover complete turns |
+| 94.9% cached input on 342 records with cache detail | Actual Sol cache behavior, not a router-attributable benefit |
+| 361 ms median decision-service latency | Measured additional routing overhead |
 
-Of the 350 linked usage records, 261 explicitly cover only the last model call of a turn; 89 have unknown historical scope. No validated accepted-work/rework comparison is available. **Subscription savings and engineering-quality improvements remain unproven.** Shadow data identifies candidate changes; it does not establish their token consumption or quality when executed.
+**What is still unknown:** subscription allowance saved, quality-equivalent completion cost, and effect on rework. The historical sample has 261 last-call records and 89 of unknown scope. New instrumentation can record complete native-thread turns when both cumulative counters are available; it cannot repair that old sample.
 
-The October 2 measurement update adds conditional native-thread turn totals,
-separate partial-coverage aggregates, and conservative quota timestamp grouping.
-It cannot repair the historical sample above. The [evaluation protocol](docs/EVALUATION.md)
-defines how to compare accepted work and rework prospectively on a subscription.
-The opt-in [task ledger](docs/EVALUATION.md#local-task-ledger) preregisters task
-groups, assigns Auto or a fixed Shadow baseline, and records outcomes and receipt
-coverage. It does not change models automatically or infer savings from proposals.
+[Read the dated evidence](SHADOW_COMPARISON.md) · [Inspect the chart data](assets/shadow-evidence.json) · [Run a task comparison](docs/EVALUATION.md#local-task-ledger)
 
-[Full evidence and limitations](SHADOW_COMPARISON.md). Long-term evaluation should compare subscription allowance, accepted work, elapsed time, and rework across comparable periods. API-price simulations are secondary diagnostics, not subscription economics.
+## How it works
+
+<img src="assets/architecture.png" alt="A bounded sanitized task dossier goes to the Jev decision service. Effortlane validates model and effort locally; native Codex executes with its full context." width="1200">
+
+1. **Build a small routing dossier.** Bound and sanitize task information; omit full conversations, repository contents, images and tool outputs.
+2. **Request a recommendation.** TypeSafe/Jev supplies typed work-shape and effort choices. It does not execute the coding task.
+3. **Apply local policy.** Check available models, allowlists, risk and route continuity. A cache guard delays some downgrades; needed capability upgrades remain possible.
+4. **Execute with native Codex.** Preserve canonical context and ChatGPT authentication. Tool calls within the turn do not trigger model switching.
+5. **Record metadata locally.** Track available model, effort, token/cache counters, latency, failures and receipt coverage. No automatic telemetry upload.
+
+If the decision service is unavailable or the dossier lacks safe signal, Effortlane uses a conservative native fallback. Concrete model choices always override Auto. Effortlane does not split tasks or decide when to spawn subagents; native Codex controls delegation.
+
+## Supported clients
+
+| Integration | Current status |
+|---|---|
+| Codex interactive CLI, `exec`, resume · macOS | Implemented; validate against your installed Codex release |
+| Codex Desktop · macOS | Experimental opt-in adapter; uses an undocumented app override |
+| Claude Code · macOS | [Experimental Shadow hooks](docs/CLAUDE_CODE.md); proposals only, live validation pending |
+| Windows / Linux | Not supported by the installer |
+
+## Common questions
+
+### Does Effortlane use my ChatGPT subscription?
+
+Coding execution stays on native Codex with your existing ChatGPT login. Effortlane does not silently replace it with separately billed OpenAI or OpenRouter model execution. Jev routing decisions use a separate TypeSafe key and may incur provider charges.
+
+### Does Shadow save subscription allowance?
+
+Shadow does not apply its model or effort proposals. It helps identify candidate policies to test. An API-price counterfactual or lower-effort recommendation cannot establish Pro allowance savings. Compare accepted tasks, usage coverage, elapsed time and rework using the [evaluation protocol](docs/EVALUATION.md).
+
+### Can I control expensive models and reasoning effort?
+
+Yes. Configure model roles and policy globally; Astra is excluded from automatic selection by default. Shadow applies your selected effort to Sol. Auto chooses actual effort independently of its visible picker value. See the [policy reference](docs/OPERATIONS.md#policy-configuration) and [example configuration](policy.example.json).
+
+### Does it preserve every native feature?
+
+The integration aims to preserve native tools, but Desktop compatibility has regressed across updates before. Revalidate the tools you rely on after updates; use `effortlane desktop-safe` and restart to restore native Desktop. See [known limits](docs/OPERATIONS.md#limits).
+
+### How do I update Codex or remove Effortlane?
+
+`codex update` updates supported native CLI installations and refreshes their account catalog. It does **not** update Effortlane's Python source or ChatGPT.app. See [installation and update boundaries](docs/OPERATIONS.md#install-and-controls).
+
+Effortlane does not yet have a one-command source upgrader. Pulling this repository alone does not update the installed copy; the fresh-install bootstrap refuses an existing installation.
 
 ```sh
-effortlane metrics --hours 168
-effortlane evaluate --hours 168
-effortlane trial report --hours 168
-effortlane savings --hours 168
-```
-
-[Metrics reference](docs/METRICS.md) covers account quota snapshots, model/effort distributions, latency, cache coverage, and missing observations. Records stay local; no background telemetry upload is added.
-
-The `savings` command includes token-rate counterfactuals. Its output does not prove saved Pro allowance. Neither token totals nor successful tool exits alone establish completed-task quality.
-
-## Configuration
-
-Policy lives at `~/.local/share/jev-codex-router/config.json`; use [policy.example.json](policy.example.json) and the [policy reference](docs/OPERATIONS.md#policy-configuration).
-
-- **Model allowlist:** Astra is excluded from automatic selection by default.
-- **Effort:** Jev can propose effort independently; Shadow preserves the executor effort you select.
-- **Continuity:** Avoid gratuitous model switching during a long task. Cache affinity cannot block a needed capability upgrade.
-- **Privacy and fallback:** If Jev times out, fails, or lacks enough safe signal, use a conservative native Sol fallback.
-- **Discovery:** Desktop and standalone CLI each use their own authenticated native model catalog.
-
-Local services bind only to `127.0.0.1`. Credentials stay in owner-only local files. This is an independent community project, not an official OpenAI or TypeSafe product. See [SECURITY.md](SECURITY.md).
-
-## Disable and recover
-
-```sh
-effortlane disable          # disable routing
-codex-native              # explicit native CLI bypass
+effortlane doctor          # inspect installation and measurement health
+codex-native               # bypass routing for a native CLI session
 effortlane desktop-safe    # restore native Desktop; restart the app
-effortlane rollback        # restore backed-up managed installation settings
+effortlane disable         # disable routing
+effortlane rollback        # restore owned installation settings
 ```
 
-Ownership checks preserve unrelated or manually changed files. The installer does not modify the ChatGPT app bundle, delete sessions, or log you out. [Full recovery procedures](docs/OPERATIONS.md#limits).
+Backups and ownership checks protect unrelated edits. Sessions are not deleted and you are not logged out.
+
+## Help build Effortlane
+
+- **Try Shadow** with the [quick start](#quick-start), then inspect your local metrics.
+- **Report a reproducible bug:** [open the bug template](https://github.com/itscloud0/effortlane/issues/new?template=bug_report.md).
+- **Contribute real evidence:** [share aggregate task outcomes](https://github.com/itscloud0/effortlane/issues/new?template=measurement.md), including rework and missing coverage.
+- **Improve an adapter or policy:** read [CONTRIBUTING.md](CONTRIBUTING.md). Claude live validation and update compatibility are useful starting points.
+
+A star helps others find the project. Never post API keys, auth files, proprietary prompts, or complete rollouts in an issue.
 
 ## Documentation
 
-- [Operations, installation, policy, updates, and known limitations](docs/OPERATIONS.md)
-- [Metrics and measurement limits](docs/METRICS.md)
-- [Prospective subscription evaluation](docs/EVALUATION.md)
-- [Experimental Claude Code Shadow](docs/CLAUDE_CODE.md)
-- [Legacy compatibility](docs/COMPATIBILITY.md)
-- [Measurement history and evidence](SHADOW_COMPARISON.md)
-- [Contributing and reporting useful measurements](CONTRIBUTING.md)
-- [Security](SECURITY.md)
-- [Related implementations and attribution](docs/OPERATIONS.md#related-work)
+[Operations and policy](docs/OPERATIONS.md) · [Metrics](docs/METRICS.md) · [Evaluation](docs/EVALUATION.md) · [Claude Code](docs/CLAUDE_CODE.md) · [Evidence history](SHADOW_COMPARISON.md) · [Security](SECURITY.md) · [Related work](docs/OPERATIONS.md#related-work)
 
-## Integration roadmap
-
-| Integration | Status |
-|---|---|
-| Codex CLI on macOS | Implemented; validate against your installed release |
-| Codex Desktop on macOS | Experimental, opt-in |
-| Claude Code | Experimental opt-in Shadow hooks; no per-turn Auto or live validation yet |
-| Windows | Future work; not implemented |
-
-The independent project name leaves room for additional adapters. It does not imply cross-client or cross-platform support today.
-
-## Help make routing measurable
-
-Reproducible bugs, compatibility checks, and long-term outcome measurements are more valuable than unverified savings percentages. Please report sanitized metadata; never attach your auth file, API key, full rollout, or proprietary prompts.
-
-If this project is useful to you, a star helps others discover it. Contributions are welcome under the [MIT license](LICENSE).
+Maintained by [@itscloud0](https://github.com/itscloud0), with contributions welcome under the [MIT license](LICENSE). Independent community project; not affiliated with OpenAI, Anthropic, or TypeSafe.

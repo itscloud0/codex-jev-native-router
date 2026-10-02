@@ -1,0 +1,26 @@
+{
+  "source": {
+    "document": "SHADOW_COMPARISON.md",
+    "heading": "Updated Shadow observations — 2026-10-02, 18:18 UTC",
+    "observed_at": "2026-10-02T18:18:00Z",
+    "decision_period": "2026-09-29 through 2026-10-02"
+  },
+  "sample": {
+    "shadow_decisions": 360,
+    "jev_backed_proposals": 312,
+    "model_proposals": { "Sol": 286, "Luna": 26 },
+    "cache_held_luna_proposals": 16,
+    "effort_vs_actual": { "Lower": 114, "Same": 163, "Higher": 35 },
+    "proposed_efforts": { "Low": 48, "Medium": 217, "High": 47 },
+    "linked_usage_records": 350,
+    "cache_detail_records": 342,
+    "native_turn_scope": { "Last call": 261, "Unknown historical scope": 89 },
+    "validated_full_turn_records": 0,
+    "median_jev_latency_ms": 360.5
+  },
+  "limitations": [
+    "One Mac observation; diagnostic interactions are included.",
+    "Alternatives were not executed, so quality and savings are not demonstrated.",
+    "Historical usage scope is incomplete: 261 records cover the last call, 89 have unknown scope, and 0 validated full-turn totals exist."
+  ]
+}

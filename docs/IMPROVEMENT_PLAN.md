@@ -1,5 +1,29 @@
 # Measurement and Claude Code integration
 
+## GitHub presentation and discovery — 2026-10-03
+
+Goal: help a new visitor understand Effortlane, try Shadow, and inspect evidence.
+Scope: README, contribution guidance, a reproducible public-data chart, and GitHub
+description/topics. Preserve runtime behavior, existing images and private data.
+Use a clear project definition, direct installation and issue links, current
+support boundaries, and dated observations. Do not imply that API-price estimates
+or Shadow proposals prove subscription savings.
+
+Verification: chart count invariants and deterministic regeneration; Markdown
+links/anchors; rendered GitHub README and image; published metadata; CI. Stop
+after publication. No ranking, conversion lift, or star-count outcome is promised.
+The structure follows [GitHub README guidance](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-readmes),
+[GitHub topic guidance](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/classifying-your-repository-with-topics),
+and [Google's people-first content guidance](https://developers.google.com/search/docs/fundamentals/creating-helpful-content).
+
+Implemented: Effortlane-first repository description and 14 relevant topics;
+Shadow-first onboarding, mode comparison, FAQ and direct issue-template links;
+dated model/effort SVG generated from public aggregate JSON. CI verifies the SVG
+matches its source. Corrected the stale Claude contribution status and clarified
+that native Codex updates do not upgrade installed Effortlane source. Verified 32
+local links/anchors, evidence count invariants, SVG XML/accessibility, script
+compilation and native image rendering. No runtime or private telemetry changed.
+
 ## Independent routing under concurrency
 
 Status: implemented, tested, and installed locally on 2026-10-02.

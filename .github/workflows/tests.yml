@@ -11,6 +11,8 @@ jobs:
           persist-credentials: false
       - name: Python version
         run: python3 --version
+      - name: Verify public evidence graphic
+        run: python3 scripts/render_evidence.py --check
       - name: Unit tests
         run: python3 -m unittest discover -s . -p 'test_*.py' -q
       - name: Compile runtime modules

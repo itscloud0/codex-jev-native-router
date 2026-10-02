@@ -1,6 +1,6 @@
 # Contributing to Effortlane
 
-Effortlane currently integrates native Codex on macOS. Claude Code and Windows adapters are future work. Small, testable changes and evidence of completed-task outcomes are welcome.
+Effortlane currently integrates native Codex on macOS. Claude Code has experimental opt-in Shadow hooks with live validation pending; Windows is future work. Small, testable changes and evidence of completed-task outcomes are welcome.
 
 ## Development
 
@@ -26,3 +26,14 @@ Primary objective: less subscription allowance per correctly completed task. Rec
 Explain the concrete problem and resulting behavior, add tests for runtime behavior changes, and list validation and limits. Preserve native authentication, manual override, bounded Jev input, and clean rollback. Avoid new dependencies and unrelated refactors. New adapters must document their authentication, billing, privacy, and fail-open behavior.
 
 Ideas and routing comparisons belong in issues; private vulnerabilities follow [SECURITY.md](SECURITY.md).
+
+## Updating public evidence
+
+The README chart is generated from [a dated public aggregate](assets/shadow-evidence.json), not private logs. Update the aggregate only after checking its source in [the evidence history](SHADOW_COMPARISON.md). Keep the observation date, denominators, missing coverage and limitations visible; never present unexecuted Shadow proposals as achieved savings.
+
+```sh
+python3 scripts/render_evidence.py
+python3 scripts/render_evidence.py --check
+```
+
+The renderer uses only the Python standard library. Commit the data and SVG together. It does not read local telemetry, upload measurements, or install dependencies.

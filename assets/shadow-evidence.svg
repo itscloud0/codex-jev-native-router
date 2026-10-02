@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="580" viewBox="0 0 1200 580" role="img" aria-labelledby="title desc">
+<title id="title">Effortlane Shadow proposal evidence</title>
+<desc id="desc">A 360-decision Shadow observation from 2026-09-29 through 2026-10-02. Of 312 Jev-backed proposals, Sol was proposed 286 times and Luna 26 times. Proposed effort was lower 114 times, the same 163 times, and higher 35 times than actual selection. Alternatives were not executed, so savings and quality are not demonstrated.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#081525"/><stop offset="1" stop-color="#111e39"/></linearGradient></defs>
+<rect width="1200" height="580" rx="28" fill="url(#bg)"/><rect x="36" y="32" width="1128" height="516" rx="20" fill="#0d1b31" stroke="#24405b"/>
+<style>.title{font-size:34px;font-weight:700;font-family:Arial,Helvetica,sans-serif;fill:#f4f7fb}.sub{font-size:16px;font-weight:500;font-family:Arial,Helvetica,sans-serif;fill:#a8b7cc}.kicker{font-size:13px;font-weight:700;font-family:Arial,Helvetica,sans-serif;letter-spacing:1.4px;fill:#6ee7d8}.panel{fill:#10233d;stroke:#294765}.heading{font-size:20px;font-weight:700;font-family:Arial,Helvetica,sans-serif;fill:#f4f7fb}.label{font-size:16px;font-weight:600;font-family:Arial,Helvetica,sans-serif;fill:#d9e4f2}.value{font-size:17px;font-weight:700;font-family:Arial,Helvetica,sans-serif;fill:#f4f7fb}.muted{font-weight:500;fill:#9bb0c8}.track{fill:#203853}.note{font-size:14px;font-weight:500;font-family:Arial,Helvetica,sans-serif;fill:#a8b7cc}</style>
+<text x="58" y="74" class="kicker">EFFORTLANE · PRODUCT EVIDENCE</text><text x="58" y="114" class="title">What Effortlane Shadow recommended</text>
+<text x="58" y="142" class="sub">Observed 2026-09-29 through 2026-10-02 · snapshot 2026-10-02 18:18 UTC · one Mac</text>
+<rect x="58" y="164" width="526" height="205" rx="14" class="panel"/><text x="82" y="207" class="heading">Model proposals</text><text x="82" y="232" class="sub">312 Jev-backed proposals · 16 Luna held by cache guard</text><text x="82" y="273" class="label">Sol</text>
+<rect x="186" y="253" width="250" height="28" rx="7" class="track"/>
+<rect x="186" y="253" width="229.2" height="28" rx="7" fill="#6ee7d8"/>
+<text x="450" y="273" class="value">286 <tspan class="muted">/ 312</tspan></text>
+<text x="82" y="320" class="label">Luna</text>
+<rect x="186" y="300" width="250" height="28" rx="7" class="track"/>
+<rect x="186" y="300" width="20.8" height="28" rx="7" fill="#b9a8ff"/>
+<text x="450" y="320" class="value">26 <tspan class="muted">/ 312</tspan></text>
+<rect x="616" y="164" width="526" height="252" rx="14" class="panel"/><text x="640" y="207" class="heading">Effort vs. selected actual baseline</text><text x="640" y="232" class="sub">Each bar starts at zero · 312 proposals</text><text x="640" y="273" class="label">Lower</text>
+<rect x="744" y="253" width="250" height="28" rx="7" class="track"/>
+<rect x="744" y="253" width="91.3" height="28" rx="7" fill="#6ee7d8"/>
+<text x="1008" y="273" class="value">114 <tspan class="muted">/ 312</tspan></text>
+<text x="640" y="320" class="label">Same</text>
+<rect x="744" y="300" width="250" height="28" rx="7" class="track"/>
+<rect x="744" y="300" width="130.6" height="28" rx="7" fill="#8a9dbb"/>
+<text x="1008" y="320" class="value">163 <tspan class="muted">/ 312</tspan></text>
+<text x="640" y="367" class="label">Higher</text>
+<rect x="744" y="347" width="250" height="28" rx="7" class="track"/>
+<rect x="744" y="347" width="28.0" height="28" rx="7" fill="#b9a8ff"/>
+<text x="1008" y="367" class="value">35 <tspan class="muted">/ 312</tspan></text>
+<path d="M58 448H1142" stroke="#294765"/><text x="58" y="480" class="sub">360 Shadow decisions · 350 linked usage records · 342 with cached-detail records · median Jev 360.5 ms</text>
+<text x="58" y="514" class="note">One Mac observation; diagnostic interactions are included. Alternatives were not executed, so quality and savings are not demonstrated.</text>
+<text x="58" y="535" class="note">Historical usage scope is incomplete: 261 records cover the last call, 89 have unknown scope, and 0 validated full-turn totals exist.</text></svg>
