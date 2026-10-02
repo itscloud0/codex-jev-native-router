@@ -55,4 +55,13 @@ Over comparable periods, compare account allowance percentage points against acc
 
 Historical records lack newly added fields. Missing observations stay missing; the system does not fabricate zero consumption, complete task quality, or retroactive latency.
 
+`effortlane doctor` also reports `measurement`: a bounded scan of the last two
+telemetry file tails and the last 15 minutes. It distinguishes no recent usage,
+legacy-only, mixed generations, current partial-only, and observed full-turn
+receipts. Its static `ok` result remains separate. A correct installed file does
+not reload an already-running adapter. After finishing active work, reopen older
+clients when legacy receipts persist. Mixed records do not identify which PID
+emitted each one. The `truncated` flag discloses a limited scan; this is a recent
+diagnostic, not a census or proof of subscription savings.
+
 See [the prospective comparison protocol](EVALUATION.md) before making savings claims.

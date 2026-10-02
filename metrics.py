@@ -47,9 +47,13 @@ _NONNEGATIVE_FIELDS = (
 
 
 def _number(value: Any, *, minimum: float = 0) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < minimum:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number >= minimum else None
 
 
 def _count(value: Any) -> int | None:
@@ -59,6 +63,47 @@ def _count(value: Any) -> int | None:
 
 def _timestamp(value: Any) -> float | None:
     return _number(value)
+
+
+def measurement_status(rows: list[dict], now: float | None = None) -> dict:
+    """Describe recent instrumentation evidence, independently of static health."""
+    now = time.time() if now is None else now
+    counts: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
+    latest: dict[str, float] = {}
+    full = 0
+    for row in rows:
+        if not isinstance(row, dict) or row.get("event") != "usage":
+            continue
+        ts = _timestamp(row.get("ts"))
+        if ts is None or not now - 900 <= ts <= now + 5:
+            continue
+        schema = row.get("schema_version")
+        generation = "current" if isinstance(schema, int) and not isinstance(schema, bool) and schema >= 3 else "legacy"
+        counts[generation] += 1
+        latest[generation] = max(latest.get(generation, 0), ts)
+        reason = row.get("usage_coverage_reason")
+        reasons[reason if isinstance(reason, str) and reason in _SAFE_USAGE_COVERAGE_REASONS else "unknown"] += 1
+        input_count, output_count, cached_count = (
+            _count(row.get(key)) for key in ("input_tokens", "output_tokens", "cached_input_tokens"))
+        if (generation == "current" and row.get("usage_scope") == "turn_total"
+                and reason == "cumulative_delta" and input_count is not None
+                and output_count is not None and cached_count is not None and cached_count <= input_count):
+            full += 1
+    state = ("no_recent_usage" if not counts else "legacy_only" if not counts["current"]
+             else "mixed_generations" if counts["legacy"] else "full_turns_observed" if full
+             else "current_partial_only")
+    hints = {
+        "no_recent_usage": "No recent usage receipt was observed; static health does not verify a routed turn.",
+        "legacy_only": "Recent receipts use older instrumentation. Reload affected clients after active work finishes.",
+        "mixed_generations": "Recent receipts include both instrumentation generations; older clients may still be running.",
+        "current_partial_only": "Current instrumentation is visible, but full-turn coverage is not yet observed; inspect coverage reasons.",
+        "full_turns_observed": "Full native-thread turn receipts were observed. This does not establish task quality or savings.",
+    }
+    return {"state": state, "window_seconds": 900, "expected_schema": 3,
+            "usage_records": sum(counts.values()), "current_records": counts["current"],
+            "legacy_records": counts["legacy"], "complete_turn_records": full,
+            "latest_by_generation": latest, "coverage_reasons": dict(reasons), "hint": hints[state]}
 
 
 def _pair(row: dict, model_key: str, effort_key: str) -> str:

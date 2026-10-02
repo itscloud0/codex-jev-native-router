@@ -98,12 +98,16 @@ The October 2 measurement update adds conditional native-thread turn totals,
 separate partial-coverage aggregates, and conservative quota timestamp grouping.
 It cannot repair the historical sample above. The [evaluation protocol](docs/EVALUATION.md)
 defines how to compare accepted work and rework prospectively on a subscription.
+The opt-in [task ledger](docs/EVALUATION.md#local-task-ledger) preregisters task
+groups, assigns Auto or a fixed Shadow baseline, and records outcomes and receipt
+coverage. It does not change models automatically or infer savings from proposals.
 
 [Full evidence and limitations](SHADOW_COMPARISON.md). Long-term evaluation should compare subscription allowance, accepted work, elapsed time, and rework across comparable periods. API-price simulations are secondary diagnostics, not subscription economics.
 
 ```sh
 effortlane metrics --hours 168
 effortlane evaluate --hours 168
+effortlane trial report --hours 168
 effortlane savings --hours 168
 ```
 

@@ -581,7 +581,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         raise ValueError("TypeSafe key file missing or not owner-only")
     if agent_path.exists():
         raise ValueError("LaunchAgent already exists: " + str(agent_path))
-    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py", "claude_shadow.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "trials.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py", "claude_shadow.py"):
         if not (source_dir() / filename).exists():
             raise ValueError("missing source: " + filename)
     original_text = config_path.read_text()
@@ -597,7 +597,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = root / "backups" / ("config-" + timestamp + ".toml")
     atomic_write(backup, original_text.encode())
-    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py", "claude_shadow.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "trials.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py", "claude_shadow.py"):
         source = source_dir() / filename
         if not source.exists():
             raise ValueError("missing source: " + filename)
@@ -1277,6 +1277,7 @@ def doctor(root: Path = ROOT) -> dict:
     if checks.get("account_catalog_matches_installed") is False:
         issues.append("account model cache differs from installed catalog; refresh native models before updating Effortlane")
     return {"ok": all(checks.values()), "checks": checks, "issues": issues,
+            "measurement": measurement_health(root),
             "note": "Static and local-process checks only. Stale account caches are skipped; run desktop-refresh-models to fetch fresh Desktop metadata. A native routed turn and built-in tools still need a smoke test after updates."}
 
 
@@ -1285,6 +1286,32 @@ def telemetry_files(root: Path) -> list[Path]:
     archives = sorted(state.glob("telemetry.*.jsonl"))
     current = state / "telemetry.jsonl"
     return archives + ([current] if current.is_file() else [])
+
+
+def measurement_health(root: Path = ROOT) -> dict:
+    """Bound diagnostic work to two log tails; never print their contents."""
+    from metrics import measurement_status
+    rows = []
+    files = telemetry_files(root)
+    truncated = len(files) > 2
+    for path in files[-2:]:
+        try:
+            with path.open("rb") as source:
+                start = max(0, path.stat().st_size - 1_000_000)
+                truncated |= start > 0
+                source.seek(start)
+                if start:
+                    source.readline()
+                for line in source:
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except OSError:
+            continue
+    return {**measurement_status(rows), "bounded_tail_scan": True, "truncated": truncated}
 
 
 def telemetry_rows(root: Path, cutoff: float | None = None):
@@ -1299,7 +1326,8 @@ def telemetry_rows(root: Path, cutoff: float | None = None):
                     if not isinstance(row, dict):
                         continue
                     timestamp = row.get("ts")
-                    if cutoff is not None and isinstance(timestamp, (int, float)) and timestamp < cutoff:
+                    if (cutoff is not None and type(timestamp) in (int, float)
+                            and 0 <= timestamp <= 4_000_000_000 and timestamp < cutoff):
                         continue
                     yield row
         except FileNotFoundError:  # Rotation may finish after the file list is read.
@@ -1950,10 +1978,49 @@ def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
     return [*_cli_alias_catalog_args(root), *(args if explicit else ["-m", alias, *args])]
 
 
+def trial_command(args: list[str], root: Path = ROOT) -> dict:
+    """Register observations only; never apply a model or routing setting."""
+    from trials import start, finish, reopen, report as trial_report
+    usage = ("usage: effortlane trial start THREAD --kind mechanical|routine|debugging|design "
+             "--scope component|cross_component --risk low|high --uncertainty known|investigation "
+             "--effort low|medium|high|xhigh|max|ultra [--check tests|build|review] [--client cli|desktop] [--arm auto|baseline]; "
+             "trial finish TASK --outcome accepted|rework|failed --checks passed|failed|not_run; "
+             "trial reopen TASK; trial report [--hours 1..720]")
+    if not args:
+        raise ValueError(usage)
+    command = args[0]
+    if command == "report":
+        if len(args) not in (1, 3) or (len(args) == 3 and args[1] != "--hours"):
+            raise ValueError(usage)
+        try:
+            hours = int(args[2]) if len(args) == 3 else 168
+        except ValueError:
+            raise ValueError("hours must be 1..720") from None
+        if not 1 <= hours <= 720:
+            raise ValueError("hours must be 1..720")
+        now = dt.datetime.now(dt.timezone.utc).timestamp()
+        return trial_report(root, list(telemetry_rows(root, now - hours * 3600)), hours, now=now)
+    if command == "reopen" and len(args) == 2:
+        return reopen(root, args[1])
+    if command not in ("start", "finish") or len(args) < 2:
+        raise ValueError(usage)
+    options = args[2:]
+    allowed = ({"--kind", "--scope", "--risk", "--uncertainty", "--effort", "--check", "--client", "--arm"}
+               if command == "start" else {"--outcome", "--checks"})
+    required = allowed - {"--check", "--arm", "--client"} if command == "start" else allowed
+    if (len(options) % 2 or any(key not in allowed for key in options[::2])
+            or len(set(options[::2])) != len(options) // 2 or not required <= set(options[::2])):
+        raise ValueError(usage)
+    settings = {key[2:]: value for key, value in zip(options[::2], options[1::2])}
+    if command == "start":
+        return start(root, args[1], project=Path.cwd(), **settings)
+    return finish(root, args[1], **settings)
+
+
 def main() -> None:
     argv = sys.argv[1:]
     commands = {"install", "status", "doctor", "report", "metrics", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "desktop-refresh-models", "cli-set-native", "cli-refresh-models",
-                "desktop-enable", "desktop-disable", "desktop-safe", "claude", "claude-report"}
+                "desktop-enable", "desktop-disable", "desktop-safe", "claude", "claude-report", "trial"}
     # Only Effortlane and its legacy command manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
     if invoked in ("effortlane", "jev-codex", "manage.py") and argv and argv[0] in commands:
@@ -1992,6 +2059,7 @@ def main() -> None:
             elif cmd == "update": update_catalog()
             elif cmd == "status": print(json.dumps(status(), indent=2))
             elif cmd == "doctor": print(json.dumps(doctor(), indent=2))
+            elif cmd == "trial": print(json.dumps(trial_command(argv[1:]), indent=2))
             elif cmd == "report":
                 if len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--weights"):
                     raise ValueError("usage: effortlane report [--weights path.json]")

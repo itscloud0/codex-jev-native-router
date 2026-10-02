@@ -144,3 +144,24 @@ Quota snapshots first showed 10% weekly usage on September 30 at 16:43 UTC, and 
 Usage coverage is incomplete: 261 linked records explicitly cover the last model call, and 89 older records have unknown scope. These cannot reconstruct every internal model call of a long agent turn. The cache ratio belongs to the actual Sol execution; it cannot be transferred unchanged to a hypothetical Luna execution. No validated accepted-work/rework comparison is included.
 
 **Conclusion:** lower effort was proposed on 114 of 312 recommendations (36.5%), suggesting a hypothesis worth testing. It is not a 36.5% allowance saving. Shadow executes the baseline model and user-selected effort, so its unexecuted alternatives cannot establish quality-equivalent savings. A long-term comparison must execute the candidate policy on prospectively categorized tasks and measure account allowance, accepted work, elapsed time, and rework while accounting for overlapping activity and reset windows. API-price simulations remain secondary diagnostics rather than Pro subscription economics.
+
+## Instrumentation follow-up — 2026-10-02, 19:26 UTC
+
+A bounded scan of the last 15 minutes found 35 usage records: 26 legacy records
+and nine schema-3 records. Two of the new records contain validated native-thread
+turn totals; seven report a missing starting baseline. These are operational
+coverage counts, not independent tasks or a performance benchmark. The scan reads
+only the last two file tails and reports that limitation.
+
+The new instrumentation is producing real full-turn receipts, while older running
+adapters still emit legacy data. An on-disk update does not reload them. `effortlane
+doctor` now exposes this distinction separately from static installation health.
+After active work ends, reopen older clients; the first resumed turn may still
+lack a cumulative baseline. Historical missing calls cannot be recovered from
+these receipts.
+
+The opt-in [task ledger](docs/EVALUATION.md#local-task-ledger) now records
+preregistered task characteristics, Auto versus fixed-Shadow assignments, human
+outcomes, rework, and strict receipt coverage. No real tasks have been enrolled by
+the installer. Subscription savings and quality improvements remain unproven;
+these changes provide the measurement path rather than a claimed saving.
