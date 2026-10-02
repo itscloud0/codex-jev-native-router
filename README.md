@@ -94,6 +94,11 @@ The account-wide weekly Pro meter rose from **10% to 43%** over approximately 49
 
 Of the 350 linked usage records, 261 explicitly cover only the last model call of a turn; 89 have unknown historical scope. No validated accepted-work/rework comparison is available. **Subscription savings and engineering-quality improvements remain unproven.** Shadow data identifies candidate changes; it does not establish their token consumption or quality when executed.
 
+The October 2 measurement update adds conditional native-thread turn totals,
+separate partial-coverage aggregates, and conservative quota timestamp grouping.
+It cannot repair the historical sample above. The [evaluation protocol](docs/EVALUATION.md)
+defines how to compare accepted work and rework prospectively on a subscription.
+
 [Full evidence and limitations](SHADOW_COMPARISON.md). Long-term evaluation should compare subscription allowance, accepted work, elapsed time, and rework across comparable periods. API-price simulations are secondary diagnostics, not subscription economics.
 
 ```sh
@@ -133,6 +138,8 @@ Ownership checks preserve unrelated or manually changed files. The installer doe
 
 - [Operations, installation, policy, updates, and known limitations](docs/OPERATIONS.md)
 - [Metrics and measurement limits](docs/METRICS.md)
+- [Prospective subscription evaluation](docs/EVALUATION.md)
+- [Experimental Claude Code Shadow](docs/CLAUDE_CODE.md)
 - [Legacy compatibility](docs/COMPATIBILITY.md)
 - [Measurement history and evidence](SHADOW_COMPARISON.md)
 - [Contributing and reporting useful measurements](CONTRIBUTING.md)
@@ -145,7 +152,7 @@ Ownership checks preserve unrelated or manually changed files. The installer doe
 |---|---|
 | Codex CLI on macOS | Implemented; validate against your installed release |
 | Codex Desktop on macOS | Experimental, opt-in |
-| Claude Code | Future work; not implemented |
+| Claude Code | Experimental opt-in Shadow hooks; no per-turn Auto or live validation yet |
 | Windows | Future work; not implemented |
 
 The independent project name leaves room for additional adapters. It does not imply cross-client or cross-platform support today.

@@ -130,6 +130,9 @@ def cost_report(rows: list[dict], hours: int = 168, since: float | None = None) 
     metered = [row for row in jev_routes if isinstance(row.get("jev_input_tokens"), int) and isinstance(row.get("jev_output_tokens"), int)]
     return {
         "window_hours": hours, "since": cutoff,
+        "usage_scopes": dict(Counter(row.get("usage_scope") if row.get("usage_scope") in
+                                     ("model_call", "last_model_call", "turn_total") else "unknown" for row in usage)),
+        "usage_units_note": "Legacy calls fields count usage records. Records can cover one call, a last-call sample, or a native-thread turn total. Historical incomplete coverage cannot establish task cost or subscription savings.",
         "auto": {"route_decisions": len(auto_routes), "linked_calls": len(linked),
                  "unlinked_decisions": len(auto_routes) - len({row.get("route_id") for row in linked}),
                  "observed_all_auto": _view(auto_usage),
@@ -183,13 +186,14 @@ def format_savings(report: dict) -> str:
               if report.get("since") is not None else f"last {report['window_hours']} hours")
     lines = [
         f"Period: {period}",
-        f"Auto-attributed: {all_auto['calls']} model calls | linked to pre-turn route: {auto['linked_calls']} | unlinked (routing unproven): {auto['unlinked_auto_calls']}",
+        f"Auto-attributed: {all_auto['calls']} usage records | linked to pre-turn route: {auto['linked_calls']} | unlinked (routing unproven): {auto['unlinked_auto_calls']}",
+        report.get("usage_units_note", "Historical usage scope may be incomplete."),
         (f"Auto-attributed same-token credit-equivalent: observed mix {all_auto_credits['observed_mix']:.4f} vs all-GPT-6-Sol {all_sol:.4f}; difference {all_auto_credits['vs_sol']:+.4f} ({all_pct:+.2f}%)"
          if all_pct is not None else "Auto-attributed same-token credit-equivalent: unavailable (no priced calls)"),
         (f"Current GPT-6.1-Sol rate sensitivity, same tokens: all-6.1-Sol {all_sol_6_1:.4f}; difference {all_auto_credits['vs_sol_6_1']:+.4f} ({all_pct_6_1:+.2f}%). Not a historically available or quality-matched baseline."
          if all_pct_6_1 is not None else "Current GPT-6.1-Sol rate sensitivity: unavailable (no priced calls)"),
-        f"Pre-turn routes: {auto['route_decisions']} | linked calls: {auto['linked_calls']} | priced: {priced} | missing usage/rate: {view['unpriced_calls']}",
-        (f"Shadow baseline: {report['shadow']['route_decisions']} decisions | {report['shadow']['linked_calls']} linked Sol calls | "
+        f"Pre-turn routes: {auto['route_decisions']} | linked records: {auto['linked_calls']} | priced: {priced} | missing usage/rate: {view['unpriced_calls']}",
+        (f"Shadow baseline: {report['shadow']['route_decisions']} decisions | {report['shadow']['linked_calls']} linked Sol records | "
          f"{report['shadow']['observed_executor']['tokens']['uncached_input']} uncached / "
          f"{report['shadow']['observed_executor']['tokens']['cached_input']} cached input / "
          f"{report['shadow']['observed_executor']['tokens']['output']} output tokens; proposals did not execute"),

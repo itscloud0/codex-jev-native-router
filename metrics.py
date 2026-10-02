@@ -35,6 +35,11 @@ _FALLBACK_REASONS = {
 }
 _SAFE_LIMIT_ID = re.compile(r"(?:codex(?:_[a-z0-9]+)*|quota-[a-f0-9]{24}|gpt-\d+(?:\.\d+)*(?:-[a-z][a-z0-9]*)?)")
 _SAFE_PLAN_TYPES = {"free", "plus", "pro", "team", "business", "enterprise", "edu"}
+_SAFE_USAGE_SCOPES = {"last_model_call", "model_call", "turn_total"}
+_SAFE_USAGE_COVERAGE_REASONS = {
+    "cumulative_delta", "baseline_missing", "counter_reset", "invalid_total", "compacted", "no_usage", "total_missing",
+}
+_RESET_TOLERANCE_SECONDS = 10
 _NONNEGATIVE_FIELDS = (
     "turn_duration_ms", "first_response_ms", "tool_calls", "command_failures",
     "compactions", "reasoning_output_tokens",
@@ -102,6 +107,37 @@ def _subscription_component(value: Any) -> tuple[float, int, int] | None:
     if used is None or used > 100 or window is None or window <= 0 or reset is None:
         return None
     return used, window, reset
+
+
+def _subscription_reset_groups(
+    samples: list[tuple[float, float, int]],
+) -> list[list[tuple[float, float, int]]]:
+    """Cluster reset timestamps within a fixed range anchored at the first value.
+
+    Anchoring prevents a series such as 1000, 1009, 1018 from joining two
+    distinct reset windows through a transitive chain.
+    """
+    groups: list[list[tuple[float, float, int]]] = []
+    for sample in sorted(samples, key=lambda value: (value[2], value[0], value[1])):
+        if not groups or sample[2] - groups[-1][0][2] > _RESET_TOLERANCE_SECONDS:
+            groups.append([sample])
+        else:
+            groups[-1].append(sample)
+    return groups
+
+
+def _separate_crossed_reset_boundary(
+    samples: list[tuple[float, float, int]],
+) -> list[list[tuple[float, float, int]]]:
+    """Do not treat observations on opposite sides of a scheduled reset as one window."""
+    reset_min = min(reset for _, _, reset in samples)
+    reset_max = max(reset for _, _, reset in samples)
+    before = [sample for sample in samples if sample[0] < reset_min]
+    after = [sample for sample in samples if sample[0] >= reset_max]
+    if not before or not after:
+        return [samples]
+    middle = [sample for sample in samples if reset_min <= sample[0] < reset_max]
+    return [group for group in (before, middle, after) if group]
 
 
 def metrics_report(rows: list[dict], hours: int = 168, since: float | None = None) -> dict:
@@ -172,35 +208,63 @@ def metrics_report(rows: list[dict], hours: int = 168, since: float | None = Non
     turn_duration: list[float] = []
     first_response: list[float] = []
     scopes: Counter[str] = Counter()
+    coverage_reasons: Counter[str] = Counter()
     token_totals = {field: 0 for field in ("input_tokens", "cached_input_tokens", "output_tokens")}
     token_counts = {field: 0 for field in token_totals}
+    token_totals_by_scope: dict[str, dict[str, int]] = {}
+    token_counts_by_scope: dict[str, dict[str, int]] = {}
     quality_signals: Counter[str] = Counter()
     cache_numerator = 0.0
     cache_denominator = 0.0
     cache_observed = 0
     cache_missing = 0
+    cache_by_scope: dict[str, dict[str, float | int | None]] = {}
+    complete_turns = 0
     for row in linked_usage:
+        raw_scope = row.get("usage_scope")
+        scope = raw_scope if isinstance(raw_scope, str) and raw_scope in _SAFE_USAGE_SCOPES else "unknown"
+        scopes[scope] += 1
+        scoped_totals = token_totals_by_scope.setdefault(scope, {field: 0 for field in token_totals})
+        scoped_counts = token_counts_by_scope.setdefault(scope, {field: 0 for field in token_totals})
+        scoped_cache = cache_by_scope.setdefault(scope, {
+            "observed_calls": 0, "missing_coverage_calls": 0,
+            "cached_input_ratio": None, "_numerator": 0.0, "_denominator": 0.0,
+        })
         for field in token_totals:
             value = _count(row.get(field))
             if value is not None and (field != "cached_input_tokens" or row.get("cached_input_observed") is True or row.get("cache_observed") is True):
                 token_totals[field] += value
                 token_counts[field] += 1
+                scoped_totals[field] += value
+                scoped_counts[field] += 1
         for field in ("prior_failed", "manual_override"):
             if row.get(field) is True:
                 quality_signals[field] += 1
         status = row.get("status")
         statuses[status if status in {"ok", "error", "cancelled"} else "unknown"] += 1
-        scope = row.get("usage_scope")
-        scopes[scope if scope in {"last_model_call", "model_call"} else "unknown"] += 1
+        coverage_reason = row.get("usage_coverage_reason")
+        if isinstance(coverage_reason, str) and coverage_reason in _SAFE_USAGE_COVERAGE_REASONS:
+            coverage_reasons[coverage_reason] += 1
         observed = row.get("cache_observed") is True or row.get("cached_input_observed") is True
         input_tokens = _number(row.get("input_tokens"))
         cached = _number(row.get("cached_input_tokens"))
+        input_token_count = _count(row.get("input_tokens"))
+        cached_token_count = _count(row.get("cached_input_tokens"))
+        output_tokens = _count(row.get("output_tokens"))
+        if (scope == "turn_total" and coverage_reason == "cumulative_delta"
+                and input_token_count is not None and output_tokens is not None
+                and (not observed or (cached_token_count is not None and cached_token_count <= input_token_count))):
+            complete_turns += 1
         if observed and input_tokens is not None and cached is not None and cached <= input_tokens:
             cache_observed += 1
             cache_numerator += cached
             cache_denominator += input_tokens
+            scoped_cache["observed_calls"] += 1
+            scoped_cache["_numerator"] += cached
+            scoped_cache["_denominator"] += input_tokens
         else:
             cache_missing += 1
+            scoped_cache["missing_coverage_calls"] += 1
         for field in _NONNEGATIVE_FIELDS:
             value = _number(row.get(field))
             if value is not None:
@@ -211,7 +275,7 @@ def metrics_report(rows: list[dict], hours: int = 168, since: float | None = Non
                 elif field == "first_response_ms":
                     first_response.append(value)
 
-    subscription_groups: dict[tuple[str, str, int, int], list[tuple[float, float]]] = defaultdict(list)
+    subscription_samples: dict[tuple[str, str, int], list[tuple[float, float, int]]] = defaultdict(list)
     plan_types: Counter[str] = Counter()
     for row in subscriptions:
         limit_id = row.get("limit_id")
@@ -225,27 +289,61 @@ def metrics_report(rows: list[dict], hours: int = 168, since: float | None = Non
             parsed = _subscription_component(row.get(component))
             if parsed is not None:
                 used, window, reset = parsed
-                subscription_groups[(limit_id, component, window, reset)].append((ts, used))
+                subscription_samples[(limit_id, component, window)].append((ts, used, reset))
     subscription_view = []
-    for (limit_id, component, window, reset), samples in sorted(subscription_groups.items()):
-        # The same snapshot may be emitted by more than one observer. It is one
-        # account-wide observation, not independent per-client consumption.
-        samples = sorted(set(samples))
-        first_ts, first_used = samples[0]
-        last_ts, last_used = samples[-1]
-        subscription_view.append({
-            "limit_id": limit_id, "component": component, "window_minutes": window, "resets_at": reset,
-            "observations": len(samples), "first": {"ts": first_ts, "used_percent": first_used},
-            "last": {"ts": last_ts, "used_percent": last_used},
-            "delta_percentage_points": round(last_used - first_used, 3),
-            "reset_or_correction_observed": any(
-                current_ts > previous_ts and current_used < previous_used
-                for (previous_ts, previous_used), (current_ts, current_used) in zip(samples, samples[1:])
-            ),
-        })
+    for (limit_id, component, window), raw_samples in sorted(subscription_samples.items()):
+        for initial_reset_group in _subscription_reset_groups(raw_samples):
+            for reset_group in _separate_crossed_reset_boundary(initial_reset_group):
+                # The same snapshot may be emitted by more than one observer. It is one
+                # account-wide observation, not independent per-client consumption.
+                samples = sorted(set(reset_group), key=lambda value: (value[0], value[1], value[2]))
+                first_ts, first_used, _ = samples[0]
+                last_ts, last_used, _ = samples[-1]
+                reset_values = [reset for _, _, reset in samples]
+                reset_min, reset_max = min(reset_values), max(reset_values)
+                group_samples = set(reset_group)
+                same_timestamp_values: dict[float, list[float]] = defaultdict(list)
+                for sample_ts, used, reset in raw_samples:
+                    if (sample_ts, used, reset) not in group_samples:
+                        continue
+                    if used not in same_timestamp_values[sample_ts]:
+                        same_timestamp_values[sample_ts].append(used)
+                ambiguous_same_timestamp_samples = any(len(values) > 1 for values in same_timestamp_values.values())
+                decreasing_same_timestamp_samples = any(
+                    any(later < earlier for earlier, later in zip(values, values[1:]))
+                    for values in same_timestamp_values.values()
+                )
+                first_values = sorted({used for sample_ts, used, _ in samples if sample_ts == first_ts})
+                last_values = sorted({used for sample_ts, used, _ in samples if sample_ts == last_ts})
+                endpoints_ambiguous = len(first_values) > 1 or len(last_values) > 1
+                first = {"ts": first_ts, "used_percent": first_values[0] if len(first_values) == 1 else None}
+                last = {"ts": last_ts, "used_percent": last_values[0] if len(last_values) == 1 else None}
+                if len(first_values) > 1:
+                    first["used_percent_range"] = {"min": first_values[0], "max": first_values[-1]}
+                if len(last_values) > 1:
+                    last["used_percent_range"] = {"min": last_values[0], "max": last_values[-1]}
+                subscription_view.append({
+                "limit_id": limit_id, "component": component, "window_minutes": window,
+                "resets_at": reset_min, "reset_at_min": reset_min, "reset_at_max": reset_max,
+                "reset_tolerance_seconds": _RESET_TOLERANCE_SECONDS,
+                "observations": len(samples), "first": first, "last": last,
+                "delta_percentage_points": None if endpoints_ambiguous else round(last_used - first_used, 3),
+                "reset_or_correction_observed": any(
+                    current_ts > previous_ts and current_used < previous_used
+                    for (previous_ts, previous_used, _), (current_ts, current_used, _) in zip(samples, samples[1:])
+                ),
+                "decreasing_same_timestamp_samples": decreasing_same_timestamp_samples,
+                "ambiguous_same_timestamp_samples": ambiguous_same_timestamp_samples,
+                })
 
+    subscription_view.sort(key=lambda group: (group["last"]["ts"], group["reset_at_max"], group["limit_id"], group["component"]), reverse=True)
     omitted_subscription_groups = max(0, len(subscription_view) - 200)
     subscription_view = subscription_view[:200]
+
+    for scoped_cache in cache_by_scope.values():
+        denominator = scoped_cache.pop("_denominator")
+        numerator = scoped_cache.pop("_numerator")
+        scoped_cache["cached_input_ratio"] = round(numerator / denominator, 6) if denominator else None
 
     linked_route_ids = {row.get("route_id") for row in linked_usage}
     metric_totals["reasoning_output_tokens"] = (
@@ -266,10 +364,16 @@ def metrics_report(rows: list[dict], hours: int = 168, since: float | None = Non
                   "linked_route_decisions": len(linked_route_ids), "unlinked_calls": len(usage) - len(linked_usage),
                   "unlinked_native_calls_excluded_from_routed_claims": unlinked_native, "statuses": dict(sorted(statuses.items())),
                   "usage_scope": dict(sorted(scopes.items())),
+                  "complete_turns": complete_turns,
+                  "overall_totals_may_mix_usage_scopes": len(scopes) > 1,
+                  "usage_coverage_reasons": dict(sorted(coverage_reasons.items())),
                   "token_totals": token_totals, "token_observation_counts": token_counts,
+                  "token_totals_by_scope": dict(sorted(token_totals_by_scope.items())),
+                  "token_observation_counts_by_scope": dict(sorted(token_counts_by_scope.items())),
                   "weak_quality_signals": dict(sorted(quality_signals.items())),
                   "cache": {"observed_calls": cache_observed, "missing_coverage_calls": cache_missing,
                             "cached_input_ratio": round(cache_numerator / cache_denominator, 6) if cache_denominator else None},
+                  "cache_by_scope": dict(sorted(cache_by_scope.items())),
                   "turn_metrics": {"totals": metric_totals, "observation_counts": metric_counts,
                                    "latency_ms": {"turn_duration": _latency(turn_duration), "first_response": _latency(first_response)}}},
         "quality_equivalent_savings": None,

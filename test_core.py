@@ -893,6 +893,16 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(row["turn_duration_ms"], 1234)
         self.assertEqual(row["usage_scope"], "last_model_call")
 
+    def test_complete_turn_coverage_metadata_is_allowlisted(self):
+        self.router.record_usage({'usage_scope': 'turn_total', 'usage_coverage_reason': 'cumulative_delta'},
+                                 {'input_tokens': 250, 'output_tokens': 30,
+                                  'input_tokens_details': {'cached_tokens': 160}}, 'ok')
+        row = json.loads((self.root / 'telemetry.jsonl').read_text())
+        self.assertEqual((row['schema_version'], row['usage_scope'], row['usage_coverage_reason']),
+                         (3, 'turn_total', 'cumulative_delta'))
+        self.router.record_usage({'usage_coverage_reason': 'private-prompt'}, None, 'ok')
+        self.assertNotIn('private-prompt', (self.root / 'telemetry.jsonl').read_text())
+
     def test_catalog_visibility_and_telemetry_allowlist(self):
         roles = visible_roles(catalog())
         self.assertEqual(set(roles), {"luna", "terra", "sol", "astra"})

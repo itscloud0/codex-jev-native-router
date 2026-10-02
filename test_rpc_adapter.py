@@ -379,8 +379,101 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn('t', usage['route_id'])
         self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'gpt-6-sol',
                                                    'input': [{'type': 'text', 'text': 'manual'}]}, 2))
+        completed['params']['turn']['id'] = 'turn-2'
         self.adapter.server((json.dumps(completed) + '\n').encode())
         self.assertEqual(self.router.usage_records[-1][0][0]['route_id'], '')
+
+    @staticmethod
+    def usage_event(turn, total, last=None):
+        def counters(values):
+            inp, cached, output, reasoning = values
+            return {'inputTokens': inp, 'cachedInputTokens': cached, 'outputTokens': output,
+                    'reasoningOutputTokens': reasoning, 'totalTokens': inp + output}
+        return (json.dumps({'method': 'thread/tokenUsage/updated', 'params': {
+            'threadId': 't', 'turnId': turn,
+            'tokenUsage': {'total': counters(total), 'last': counters(last or total)}}})+'\n').encode()
+
+    def begin_measured_turn(self, turn, fresh=False):
+        if fresh:
+            self.adapter.client(request('thread/start', {'model': 'jev-shadow'}, 80))
+            self.adapter.server(response(80, {'thread': {'id': 't'}, 'model': 'gpt-6-sol'}))
+        self.adapter.client(request('turn/start', {'threadId': 't', 'model': 'jev-shadow'}, 81))
+        self.adapter.server((json.dumps({'method': 'turn/started', 'params': {
+            'threadId': 't', 'turn': {'id': turn}}})+'\n').encode())
+
+    def complete_measured_turn(self, turn, status='completed'):
+        raw = (json.dumps({'method': 'turn/completed', 'params': {
+            'threadId': 't', 'turn': {'id': turn, 'status': status}}})+'\n').encode()
+        self.assertEqual(self.adapter.server(raw), raw)
+        return self.router.usage_records[-1][0]
+
+    def test_full_turn_counts_multiple_calls_once_and_preserves_context_size(self):
+        self.begin_measured_turn('a', fresh=True)
+        first = self.usage_event('a', (100, 40, 10, 5))
+        self.assertEqual(self.adapter.server(first), first)
+        self.adapter.server(first)  # duplicate cumulative snapshot, not another call
+        self.adapter.server(self.usage_event('a', (250, 160, 30, 17), (150, 120, 20, 12)))
+        decision, usage, status = self.complete_measured_turn('a')
+        self.assertEqual((decision['usage_scope'], decision['usage_coverage_reason']), ('turn_total', 'cumulative_delta'))
+        self.assertEqual(usage['input_tokens'], 250)
+        self.assertEqual(usage['output_tokens'], 30)
+        self.assertEqual(usage['input_tokens_details']['cached_tokens'], 160)
+        self.assertEqual(usage['output_tokens_details']['reasoning_tokens'], 17)
+        self.assertEqual(self.adapter.last_context['t'], 150)  # context != cumulative input
+        size = len(self.router.usage_records)
+        self.complete_measured_turn('a')
+        self.assertEqual(len(self.router.usage_records), size)
+        self.begin_measured_turn('b')
+        self.adapter.server(self.usage_event('a', (100, 40, 10, 5)))  # delayed old snapshot
+        self.adapter.server(self.usage_event('b', (450, 340, 55, 32), (200, 180, 25, 15)))
+        decision, usage, _ = self.complete_measured_turn('b')
+        self.assertEqual((decision['usage_scope'], usage['input_tokens']), ('turn_total', 200))
+
+    def test_resume_without_baseline_is_partial_then_next_turn_has_full_coverage(self):
+        self.begin_measured_turn('a')
+        self.adapter.server(self.usage_event('a', (50000, 40000, 1000, 500), (100, 40, 10, 5)))
+        decision, usage, _ = self.complete_measured_turn('a')
+        self.assertEqual((decision['usage_scope'], decision['usage_coverage_reason']), ('last_model_call', 'baseline_missing'))
+        self.assertEqual(usage['input_tokens'], 100)
+        self.begin_measured_turn('b')
+        self.adapter.server(self.usage_event('b', (50200, 40150, 1030, 520), (200, 150, 30, 20)))
+        decision, usage, _ = self.complete_measured_turn('b', 'interrupted')
+        self.assertEqual((decision['usage_scope'], usage['input_tokens']), ('turn_total', 200))
+
+    def test_reset_or_compaction_never_claims_full_turn(self):
+        for scenario in ('reset', 'compaction', 'malformed', 'missing'):
+            with self.subTest(scenario=scenario):
+                old_tmp = self.tmp
+                self.setUp()
+                try:
+                    self.begin_measured_turn('a', fresh=True)
+                    self.adapter.server(self.usage_event('a', (100, 40, 10, 5)))
+                    if scenario == 'compaction':
+                        self.adapter.server(b'{"method":"thread/compacted","params":{"threadId":"t"}}\n')
+                    second = json.loads(self.usage_event('a', (50, 30, 5, 2) if scenario == 'reset' else (200, 100, 20, 9)))
+                    if scenario == 'malformed':
+                        second['params']['tokenUsage']['total']['totalTokens'] = 999999
+                    if scenario == 'missing':
+                        second['params']['tokenUsage'].pop('total')
+                    self.adapter.server((json.dumps(second)+'\n').encode())
+                    decision, _, _ = self.complete_measured_turn('a')
+                    self.assertEqual(decision['usage_scope'], 'last_model_call')
+                    reasons = {'reset': 'counter_reset', 'missing': 'total_missing',
+                               'malformed': 'invalid_total', 'compaction': 'compacted'}
+                    self.assertEqual(decision['usage_coverage_reason'], reasons[scenario])
+                finally:
+                    self.tearDown()
+                    self.tmp = old_tmp
+
+    def test_no_usage_is_missing_not_zero_and_turn_start_error_clears_window(self):
+        self.begin_measured_turn('a', fresh=True)
+        decision, usage, _ = self.complete_measured_turn('a')
+        self.assertIsNone(usage)
+        self.assertEqual(decision['usage_coverage_reason'], 'no_usage')
+        self.begin_measured_turn('b')
+        self.adapter.server(b'{"id":81,"error":{"code":-1,"message":"failed"}}\n')
+        self.assertNotIn('t', self.adapter.usage_windows)
+        self.assertNotIn('t', self.adapter.turn_started)
 
     def test_cli_client_routes_before_native_turn_with_cli_receipt(self):
         adapter = rpc_adapter.Adapter(self.root, router=self.router, client='cli')

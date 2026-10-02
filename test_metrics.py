@@ -35,7 +35,7 @@ class MetricsReportTests(unittest.TestCase):
         report = metrics_report(rows)
         groups = report["subscriptions"]["groups"]
         self.assertEqual(len(groups), 2)
-        reset = groups[0]
+        reset = next(group for group in groups if group["window_minutes"] == 300)
         self.assertEqual((reset["window_minutes"], reset["observations"], reset["delta_percentage_points"]), (300, 2, -60))
         self.assertTrue(reset["reset_or_correction_observed"])
         self.assertIsNone(report["subscription_allowance_savings"])
@@ -73,10 +73,59 @@ class MetricsReportTests(unittest.TestCase):
         rows = [
             {"event": "subscription", "ts": self.now, "limit_id": "codex", "plan_type": "pro",
              "primary": {"used_percent": 1, "window_minutes": 1, "resets_at": reset}}
-            for reset in range(201)
+            for reset in range(0, 201 * 11, 11)
         ]
         subscriptions = metrics_report(rows)["subscriptions"]
         self.assertEqual((len(subscriptions["groups"]), subscriptions["omitted_groups"]), (200, 1))
+        self.assertEqual(subscriptions["groups"][0]["resets_at"], 2200)
+
+    def test_subscription_coalesces_small_reset_timestamp_jitter(self):
+        rows = [
+            {"event": "subscription", "ts": self.now - 2, "limit_id": "codex",
+             "primary": {"used_percent": 10, "window_minutes": 300, "resets_at": 1000}},
+            {"event": "subscription", "ts": self.now - 1, "limit_id": "codex",
+             "primary": {"used_percent": 20, "window_minutes": 300, "resets_at": 1009}},
+        ]
+        group = metrics_report(rows)["subscriptions"]["groups"][0]
+        self.assertEqual((group["observations"], group["reset_at_min"], group["reset_at_max"]), (2, 1000, 1009))
+        self.assertEqual(group["reset_tolerance_seconds"], 10)
+
+    def test_subscription_reset_groups_do_not_chain_or_cross_real_boundary(self):
+        rows = [
+            {"event": "subscription", "ts": self.now - 3, "limit_id": "codex",
+             "primary": {"used_percent": 10, "window_minutes": 300, "resets_at": 1000}},
+            {"event": "subscription", "ts": self.now - 2, "limit_id": "codex",
+             "primary": {"used_percent": 20, "window_minutes": 300, "resets_at": 1009}},
+            {"event": "subscription", "ts": self.now - 1, "limit_id": "codex",
+             "primary": {"used_percent": 5, "window_minutes": 300, "resets_at": 1018}},
+        ]
+        groups = metrics_report(rows)["subscriptions"]["groups"]
+        self.assertEqual(sorted(group["observations"] for group in groups), [1, 2])
+        self.assertEqual(sorted((group["reset_at_min"], group["reset_at_max"]) for group in groups), [(1000, 1009), (1018, 1018)])
+
+    def test_subscription_flags_conflicting_same_timestamp_samples_without_counting_duplicates(self):
+        snapshot = {"event": "subscription", "ts": self.now, "limit_id": "codex",
+                    "primary": {"used_percent": 30, "window_minutes": 300, "resets_at": 1000}}
+        lower = {**snapshot, "primary": {"used_percent": 20, "window_minutes": 300, "resets_at": 1000}}
+        group = metrics_report([snapshot, snapshot, lower])["subscriptions"]["groups"][0]
+        self.assertEqual(group["observations"], 2)
+        self.assertTrue(group["ambiguous_same_timestamp_samples"])
+        self.assertTrue(group["decreasing_same_timestamp_samples"])
+        self.assertIsNone(group["delta_percentage_points"])
+        self.assertIsNone(group["first"]["used_percent"])
+        self.assertEqual(group["first"]["used_percent_range"], {"min": 20, "max": 30})
+
+    def test_subscription_separates_samples_on_opposite_sides_of_reset_epoch(self):
+        reset = int(self.now) - 10
+        rows = [
+            {"event": "subscription", "ts": reset - 2, "limit_id": "codex",
+             "primary": {"used_percent": 90, "window_minutes": 300, "resets_at": reset}},
+            {"event": "subscription", "ts": reset + 2, "limit_id": "codex",
+             "primary": {"used_percent": 2, "window_minutes": 300, "resets_at": reset}},
+        ]
+        groups = metrics_report(rows)["subscriptions"]["groups"]
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(sorted(group["observations"] for group in groups), [1, 1])
 
     def test_only_exactly_linked_usage_contributes_metrics_and_cache_coverage(self):
         linked = {"event": "usage", "ts": self.now, "route_id": "a" * 24, "session": "b" * 24,
@@ -93,6 +142,51 @@ class MetricsReportTests(unittest.TestCase):
         self.assertEqual(usage["turn_metrics"]["totals"]["turn_duration_ms"], 20)
         self.assertEqual(usage["turn_metrics"]["totals"]["reasoning_output_tokens"], 9)
         self.assertEqual(report["routes"]["latency_ms"]["jev"], {"observations": 1, "p50": 3, "p95": 3})
+
+    def test_usage_reports_complete_turn_totals_separately_from_fallback_scope(self):
+        complete = {**self.route, "event": "usage", "usage_scope": "turn_total",
+                    "usage_coverage_reason": "cumulative_delta", "input_tokens": 100,
+                    "cached_input_tokens": 20, "cached_input_observed": True, "output_tokens": 30}
+        fallback = {**self.route, "event": "usage", "usage_scope": "last_model_call",
+                    "usage_coverage_reason": "total_missing", "input_tokens": 4, "output_tokens": 2}
+        usage = metrics_report([self.route, complete, fallback])["usage"]
+        self.assertEqual(usage["complete_turns"], 1)
+        self.assertTrue(usage["overall_totals_may_mix_usage_scopes"])
+        self.assertEqual(usage["token_totals"], {"input_tokens": 104, "cached_input_tokens": 20, "output_tokens": 32})
+        self.assertEqual(usage["token_totals_by_scope"]["turn_total"],
+                         {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 30})
+        self.assertEqual(usage["cache_by_scope"]["turn_total"]["cached_input_ratio"], 0.2)
+        self.assertEqual(usage["usage_coverage_reasons"], {"cumulative_delta": 1, "total_missing": 1})
+
+    def test_usage_ignores_invalid_coverage_metadata_and_missing_token_fields(self):
+        usage = {**self.route, "event": "usage", "usage_scope": "secret-scope",
+                 "usage_coverage_reason": "private-detail", "input_tokens": -1,
+                 "cached_input_tokens": "not-a-count", "output_tokens": None}
+        report = metrics_report([self.route, usage])
+        usage_report = report["usage"]
+        self.assertEqual(usage_report["usage_scope"], {"unknown": 1})
+        self.assertEqual(usage_report["usage_coverage_reasons"], {})
+        self.assertEqual(usage_report["token_observation_counts"],
+                         {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0})
+        self.assertNotIn("secret-scope", str(report))
+        self.assertNotIn("private-detail", str(report))
+
+    def test_usage_metadata_containers_do_not_crash_or_leak(self):
+        usage = {**self.route, "event": "usage", "usage_scope": ["turn_total"],
+                 "usage_coverage_reason": {"reason": "cumulative_delta"}}
+        report = metrics_report([self.route, usage])
+        self.assertEqual(report["usage"]["usage_scope"], {"unknown": 1})
+        self.assertEqual(report["usage"]["usage_coverage_reasons"], {})
+        self.assertNotIn("cumulative_delta", str(report))
+
+    def test_complete_turns_require_reliable_complete_usage(self):
+        valid = {**self.route, "event": "usage", "usage_scope": "turn_total",
+                 "usage_coverage_reason": "cumulative_delta", "input_tokens": 10, "output_tokens": 1}
+        missing_output = {**valid, "output_tokens": None}
+        incoherent_cache = {**valid, "cached_input_observed": True, "cached_input_tokens": 11}
+        fallback_reason = {**valid, "usage_coverage_reason": "total_missing"}
+        report = metrics_report([self.route, valid, missing_output, incoherent_cache, fallback_reason])
+        self.assertEqual(report["usage"]["complete_turns"], 1)
 
     def test_malformed_input_is_skipped_without_leaking_or_counting_it(self):
         malformed_subscription = {"event": "subscription", "ts": self.now, "limit_id": "not-safe",

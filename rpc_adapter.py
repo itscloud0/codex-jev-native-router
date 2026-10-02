@@ -55,6 +55,26 @@ def _alias(model: Any) -> str | None:
     return model if isinstance(model, str) and model in ALIASES else None
 
 
+def _usage_counts(value: Any) -> dict | None:
+    """Validate native cumulative counters, including synthetic context resets."""
+    fields = ("inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens")
+    if not isinstance(value, dict) or not all(
+            isinstance(value.get(key), int) and not isinstance(value[key], bool)
+            and 0 <= value[key] <= 2**63 - 1 for key in fields):
+        return None
+    if (value["cachedInputTokens"] > value["inputTokens"]
+            or value["reasoningOutputTokens"] > value["outputTokens"]
+            or value["totalTokens"] != value["inputTokens"] + value["outputTokens"]):
+        return None
+    return {key: value[key] for key in fields}
+
+
+def _usage_payload(value: dict) -> dict:
+    return {"input_tokens": value["inputTokens"], "output_tokens": value["outputTokens"],
+            "input_tokens_details": {"cached_tokens": value["cachedInputTokens"]},
+            "output_tokens_details": {"reasoning_tokens": value.get("reasoningOutputTokens")}}
+
+
 def _shadow_effort(params: dict, saved: dict | None = None) -> str | None:
     settings = params.get("collaborationMode", {}).get("settings") if isinstance(params.get("collaborationMode"), dict) else None
     config = params.get("config") if isinstance(params.get("config"), dict) else None
@@ -215,6 +235,9 @@ class Adapter:
         self.last_context: dict[str, int] = {}
         self.last_cache_pct: dict[str, tuple[int, float]] = {}
         self.turn_usage: dict[tuple[str, str], dict] = {}
+        self.usage_totals: dict[str, dict] = {}
+        self.usage_windows: dict[str, dict] = {}
+        self.completed_turns: dict[tuple[str, str], bool] = {}
         self.turn_routes: dict[str, str] = {}
         self.turn_signals: dict[str, dict] = {}
         self.pending_override: dict[str, bool] = {}
@@ -241,6 +264,47 @@ class Adapter:
         except Exception:
             pass
         return "gpt-6-sol"
+
+    def _observe_usage(self, thread_id: str, turn_id: str, token_usage: dict) -> None:
+        if (thread_id, turn_id) in self.completed_turns:
+            return
+        window = self.usage_windows.get(thread_id)
+        if window is not None:
+            if window.get("turn_id") not in (None, turn_id):
+                return  # A delayed notification must not change the new turn's baseline.
+            window["turn_id"] = turn_id
+        total = _usage_counts(token_usage.get("total"))
+        last = token_usage.get("last")
+        if isinstance(last, dict):
+            fields = ("inputTokens", "cachedInputTokens", "outputTokens")
+            if all(isinstance(last.get(key), int) and not isinstance(last[key], bool)
+                   and 0 <= last[key] <= 2**63 - 1 for key in fields) and last["cachedInputTokens"] <= last["inputTokens"]:
+                self._remember(self.turn_usage, (thread_id, turn_id), _usage_payload(last))
+        if total is None:
+            self.usage_totals.pop(thread_id, None)
+            if window is not None:
+                window["reason"] = "invalid_total" if "total" in token_usage else "total_missing"
+            return
+        if window is not None:
+            previous = window.get("end") or window.get("baseline")
+            if previous is not None and any(total[key] < previous[key] for key in total):
+                window["reason"] = "counter_reset"
+            window["end"] = total
+        self._remember(self.usage_totals, thread_id, total)
+
+    def _completed_usage(self, thread_id: str, turn_id: str | None) -> tuple[dict | None, str, str]:
+        last = self.turn_usage.pop((thread_id, turn_id), None)
+        window = self.usage_windows.pop(thread_id, None)
+        if not window:
+            return last, "last_model_call", "baseline_missing" if last else "no_usage"
+        reason = window.get("reason")
+        baseline, end = window.get("baseline"), window.get("end")
+        if not reason and baseline is not None and end is not None and window.get("turn_id") == turn_id:
+            delta = _usage_counts({key: end[key] - baseline[key] for key in end})
+            if delta is not None:
+                return _usage_payload(delta), "turn_total", "cumulative_delta"
+            reason = "invalid_total"
+        return last, "last_model_call", reason or ("baseline_missing" if last else "no_usage")
 
     def _mask_thread_model(self, thread: Any) -> bool:
         if not isinstance(thread, dict):
@@ -449,10 +513,14 @@ class Adapter:
                     changed["params"]["collaborationMode"]["settings"]["reasoning_effort"] = effort
             return _encode(changed)
         if method == "turn/start":
-            if thread_id and thread_id not in self.active:
+            if thread_id and thread_id not in self.turn_started:
                 self._remember(self.turn_started, thread_id, time.monotonic())
                 self.first_response.pop(thread_id, None)
+                self._remember(self.usage_windows, thread_id,
+                               {"baseline": self.usage_totals.get(thread_id)})
             if not thread_id or not alias:
+                if thread_id and rid and len(self.pending) < MAX_PENDING:
+                    self.pending[rid] = {"method": method, "thread": thread_id, "alias": None}
                 if thread_id and manual_override:
                     self._remember(self.turn_signals, thread_id,
                                    {"manual_override": True, "prior_failed": prior_failed,
@@ -534,6 +602,10 @@ class Adapter:
                     self.router.record_subscription(snapshot, self.client_name)
                     self.last_subscription = marker
             if isinstance(thread_id, str) and thread_id in self.turn_started:
+                if method == "turn/started" and isinstance(params.get("turn"), dict):
+                    native_turn_id = params["turn"].get("id")
+                    if isinstance(native_turn_id, str) and thread_id in self.usage_windows:
+                        self.usage_windows[thread_id]["turn_id"] = native_turn_id
                 if method == "item/agentMessage/delta" and thread_id not in self.first_response:
                     self._remember(self.first_response, thread_id,
                                    max(0, int((time.monotonic() - self.turn_started[thread_id]) * 1000)))
@@ -547,6 +619,8 @@ class Adapter:
                 if method == "thread/compacted":
                     signals = self.turn_signals.setdefault(thread_id, {})
                     signals["compactions"] = min(1_000_000, signals.get("compactions", 0) + 1)
+                    if thread_id in self.usage_windows:
+                        self.usage_windows[thread_id]["reason"] = "compacted"
             if method == "item/completed" and isinstance(thread_id, str) and thread_id in self.active:
                 item = params.get("item")
                 if isinstance(item, dict) and item.get("type") == "commandExecution":
@@ -559,6 +633,11 @@ class Adapter:
                 if self._mask_thread_model(changed["params"]["thread"]):
                     return _encode(changed)
             if method == "thread/tokenUsage/updated" and isinstance(thread_id, str):
+                observed_turn = params.get("turnId")
+                window = self.usage_windows.get(thread_id)
+                if isinstance(observed_turn, str) and ((thread_id, observed_turn) in self.completed_turns
+                        or (window and window.get("turn_id") not in (None, observed_turn))):
+                    return raw
                 last = (params.get("tokenUsage") or {}).get("last") if isinstance(params.get("tokenUsage"), dict) else None
                 context = last.get("inputTokens") if isinstance(last, dict) else None
                 if isinstance(context, int) and not isinstance(context, bool) and context >= 0:
@@ -569,23 +648,22 @@ class Adapter:
                         self._remember(self.last_cache_pct, thread_id,
                                        (min(100, (cached * 100) // context), time.monotonic()))
                 turn_id = params.get("turnId")
-                if isinstance(turn_id, str) and isinstance(last, dict):
-                    input_tokens, output_tokens = last.get("inputTokens"), last.get("outputTokens")
-                    cached = last.get("cachedInputTokens")
-                    if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
-                           for value in (input_tokens, output_tokens, cached)):
-                        self._remember(self.turn_usage, (thread_id, turn_id), {
-                            "input_tokens": input_tokens, "output_tokens": output_tokens,
-                            "input_tokens_details": {"cached_tokens": cached},
-                            "output_tokens_details": {"reasoning_tokens": last.get("reasoningOutputTokens")},
-                        })
+                if isinstance(turn_id, str) and isinstance(params.get("tokenUsage"), dict):
+                    self._observe_usage(thread_id, turn_id, params["tokenUsage"])
             elif method == "turn/completed" and isinstance(thread_id, str):
-                self.active.discard(thread_id)
                 turn = params.get("turn")
+                turn_id = turn.get("id") if isinstance(turn, dict) and isinstance(turn.get("id"), str) else None
+                if isinstance(turn_id, str):
+                    if (thread_id, turn_id) in self.completed_turns:
+                        return raw
+                    window = self.usage_windows.get(thread_id)
+                    if window and window.get("turn_id") not in (None, turn_id):
+                        return raw
+                    self._remember(self.completed_turns, (thread_id, turn_id), True)
+                self.active.discard(thread_id)
                 failed = isinstance(turn, dict) and turn.get("status") == "failed"
                 self.store.update(thread_id, failed=failed)
-                turn_id = turn.get("id") if isinstance(turn, dict) else None
-                usage = self.turn_usage.pop((thread_id, turn_id), None) if isinstance(turn_id, str) else None
+                usage, scope, coverage_reason = self._completed_usage(thread_id, turn_id)
                 saved = self.store.get(thread_id) or {}
                 model, effort = self.actual.get(thread_id, (saved.get("actual"), saved.get("effort")))
                 decision = {"model": model, "effort": effort, "client": self.client_name,
@@ -599,7 +677,8 @@ class Adapter:
                 signals = self.turn_signals.pop(thread_id, {})
                 decision.update(signals)
                 start = self.turn_started.pop(thread_id, None)
-                decision["usage_scope"] = "last_model_call"
+                decision["usage_scope"] = scope
+                decision["usage_coverage_reason"] = coverage_reason
                 decision["turn_duration_ms"] = max(0, int((time.monotonic() - start) * 1000)) if start is not None else None
                 decision["first_response_ms"] = self.first_response.pop(thread_id, None)
                 decision["tool_calls"] = signals.get("tool_calls", 0) if start is not None else None
@@ -629,6 +708,9 @@ class Adapter:
             self.active.discard(pending.get("thread"))
             self.turn_signals.pop(pending.get("thread"), None)
             self.turn_routes.pop(pending.get("thread"), None)
+            self.turn_started.pop(pending.get("thread"), None)
+            self.usage_windows.pop(pending.get("thread"), None)
+            self.first_response.pop(pending.get("thread"), None)
         if not pending or "result" not in message or not isinstance(message["result"], dict):
             return raw
         result = message["result"]
@@ -644,6 +726,9 @@ class Adapter:
         thread = result.get("thread")
         new_thread = thread.get("id") if isinstance(thread, dict) and isinstance(thread.get("id"), str) else pending.get("thread")
         alias = pending.get("alias")
+        if isinstance(new_thread, str) and pending["method"] == "thread/start":
+            self._remember(self.usage_totals, new_thread, {
+                key: 0 for key in ("inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens")})
         if isinstance(new_thread, str) and alias and pending["method"] in ("thread/start", "thread/resume", "thread/fork"):
             native_model = result.get("model")
             actual = native_model if isinstance(native_model, str) else None

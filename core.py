@@ -777,8 +777,10 @@ class Router:
             "prior_failed": decision.get("prior_failed") is True,
             "manual_override": decision.get("manual_override") is True,
             "command_failures": min(_bounded_int(decision.get("command_failures")), 255),
-            "schema_version": 2,
-            "usage_scope": decision.get("usage_scope") if decision.get("usage_scope") in ("last_model_call", "model_call") else "model_call",
+            "schema_version": 3,
+            "usage_scope": decision.get("usage_scope") if decision.get("usage_scope") in ("turn_total", "last_model_call", "model_call") else "model_call",
+            "usage_coverage_reason": decision.get("usage_coverage_reason") if decision.get("usage_coverage_reason") in (
+                "cumulative_delta", "baseline_missing", "counter_reset", "invalid_total", "compacted", "no_usage", "total_missing") else None,
             "reasoning_output_tokens": (_bounded_int(usage["output_tokens_details"]["reasoning_tokens"])
                 if not usage_missing and isinstance(usage.get("output_tokens_details"), dict)
                 and isinstance(usage["output_tokens_details"].get("reasoning_tokens"), int)

@@ -640,6 +640,15 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(exit_status.exception.code, 7)
         update.assert_called_once_with()
 
+    def test_claude_entrypoint_passes_native_arguments_to_optional_adapter(self):
+        with mock.patch.object(manage, 'ROOT', self.root), \
+                mock.patch.object(manage.sys, 'argv', ['effortlane', 'claude', '--', '--model', 'sonnet', '--resume']), \
+                mock.patch('claude_shadow.launch', return_value=7) as launch:
+            with self.assertRaises(SystemExit) as result:
+                manage.main()
+        self.assertEqual(result.exception.code, 7)
+        launch.assert_called_once_with(['--model', 'sonnet', '--resume'], self.root)
+
     def mock_desktop_launchctl(self, initial):
         current = {"value": initial}
         calls = []

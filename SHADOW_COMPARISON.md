@@ -1,5 +1,16 @@
 # Versioned Shadow policy comparison — 2026-09-23
 
+> Current measurement audit (2026-10-02, 18:46 UTC): the 360-decision Shadow
+> sample still contains 312 Jev-backed proposals (286 Sol, 26 Luna), with effort
+> lower/same/higher in 114/163/35 cases. Historical full-turn coverage is zero.
+> The corrected quota grouping consolidates the observed 9-second reset timestamp
+> drift into one weekly window: 10% to 46% used, account-wide. Intermediate
+> decreases were observed; this is not a router-attributable saving. Schema 3
+> now adds conditional native-thread turn totals for newly loaded adapters.
+> See [measurement limits](docs/METRICS.md) and the
+> [prospective evaluation protocol](docs/EVALUATION.md). Older dated sections
+> below describe the policy and evidence available at their respective dates.
+
 The `completion_v1` policy adapts useful ideas from `0xNatoshi/jev-codex-router`: account for retries, corrections, context rebuilding, model capability, and cache-switch cost. It does not copy their per-call architecture, hardcoded model identifiers, or mandatory Astra rule. It uses our discovered model catalog and configured allowlist. Auto remains on `baseline`; Shadow can run `completion_v1`.
 
 The read-only replay used 48 stratified historical first-user requests from the local Codex index. Each request was sanitized and clipped before transmission. Jev saw only the bounded task dossier. Output records contain pseudonymous IDs and decision metadata, not task text, source, tool output, keys or full conversations. Both policies ran on the same cases with Luna/Terra/Sol allowed and Astra excluded.

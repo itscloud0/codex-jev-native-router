@@ -83,7 +83,7 @@ class CostReportTests(unittest.TestCase):
                          {"uncached_input": 20, "cached_input": 80, "output": 10})
         self.assertEqual(result["auto"]["linked_calls"], 0)
         self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 0)
-        self.assertIn("Shadow baseline: 1 decisions | 1 linked Sol calls", format_savings(result))
+        self.assertIn("Shadow baseline: 1 decisions | 1 linked Sol records", format_savings(result))
 
     def test_summary_leads_with_all_observed_auto_not_optimistic_linked_subset(self):
         ts = int(time.time())
@@ -100,7 +100,7 @@ class CostReportTests(unittest.TestCase):
         self.assertEqual(result["auto"]["unlinked_auto_calls"], 99)
         self.assertEqual(result["auto"]["observed_all_auto"]["calls"], 100)
         summary = format_savings(result)
-        self.assertIn("Auto-attributed: 100 model calls | linked to pre-turn route: 1 | unlinked (routing unproven): 99", summary)
+        self.assertIn("Auto-attributed: 100 usage records | linked to pre-turn route: 1 | unlinked (routing unproven): 99", summary)
         self.assertIn("Auto-attributed same-token credit-equivalent: observed mix 4952.5000 vs all-GPT-6-Sol 5000.0000; difference +47.5000 (+0.95%)", summary)
         self.assertIn("all-6.1-Sol 5000.0000", summary)
         self.assertIn("Linked subset difference vs Sol: +47.5000 (+95.0%)", summary)

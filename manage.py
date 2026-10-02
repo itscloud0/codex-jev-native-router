@@ -581,7 +581,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
         raise ValueError("TypeSafe key file missing or not owner-only")
     if agent_path.exists():
         raise ValueError("LaunchAgent already exists: " + str(agent_path))
-    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py", "claude_shadow.py"):
         if not (source_dir() / filename).exists():
             raise ValueError("missing source: " + filename)
     original_text = config_path.read_text()
@@ -597,7 +597,7 @@ def install(root: Path = ROOT, config_path: Path = CODEX_CONFIG, bin_dir: Path =
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = root / "backups" / ("config-" + timestamp + ".toml")
     atomic_write(backup, original_text.encode())
-    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py"):
+    for filename in ("manage.py", "core.py", "costs.py", "metrics.py", "transport.py", "rpc_adapter.py", "desktop_bootstrap.py", "cli_chat.py", "cli_bridge.py", "claude_shadow.py"):
         source = source_dir() / filename
         if not source.exists():
             raise ValueError("missing source: " + filename)
@@ -1555,7 +1555,7 @@ def evaluate(root: Path = ROOT, hours: int = 24, labels_path: Path | None = None
         "human_labels": {"linked_labeled_turns": sum(sum(bucket.values()) for bucket in human_outcomes.values()),
                          "by_executed_model": human_outcomes},
         "quality_equivalent_savings": None,
-        "note": "Auto model calls are inferences, not user turns; gateway_blocks are late model proposals that could not safely change the native harness. Linked CLI launches sum observed calls; Desktop native usage may report only the last call of a turn. Command exits and turn status do not establish correctness. Human labels are local subjective outcomes, not paired counterfactuals. No quality-equivalent all-Sol or all-Astra savings estimate exists.",
+        "note": "Legacy model_calls fields count usage records, not guaranteed individual inferences. Use metrics usage_scope for native-thread turn totals versus last-call or historical samples. gateway_blocks are late proposals that could not safely change the native harness. Command exits and turn status do not establish correctness. Human labels are local subjective outcomes, not paired counterfactuals. No quality-equivalent all-Sol or all-Astra savings estimate exists.",
     }
 
 
@@ -1953,7 +1953,7 @@ def cli_bridge_args(argv: list[str], root: Path = ROOT) -> list[str] | None:
 def main() -> None:
     argv = sys.argv[1:]
     commands = {"install", "status", "doctor", "report", "metrics", "cost", "savings", "chat", "evaluate", "trace", "route", "disable", "enable", "rollback", "update", "desktop-refresh-native", "desktop-refresh-models", "cli-set-native", "cli-refresh-models",
-                "desktop-enable", "desktop-disable", "desktop-safe"}
+                "desktop-enable", "desktop-disable", "desktop-safe", "claude", "claude-report"}
     # Only Effortlane and its legacy command manage installation. The transparent codex link always passes native commands.
     invoked = Path(sys.argv[0]).name
     if invoked in ("effortlane", "jev-codex", "manage.py") and argv and argv[0] in commands:
@@ -2002,6 +2002,15 @@ def main() -> None:
                     raise ValueError("usage: effortlane metrics [--hours 1..720]")
                 from metrics import metrics_report
                 print(json.dumps(metrics_report(list(telemetry_rows(ROOT)), int(argv[2]) if len(argv) == 3 else 168), indent=2))
+            elif cmd == "claude":
+                from claude_shadow import launch
+                options = argv[2:] if argv[1:2] == ["--"] else argv[1:]
+                raise SystemExit(launch(options, ROOT))
+            elif cmd == "claude-report":
+                if len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--hours"):
+                    raise ValueError("usage: effortlane claude-report [--hours 1..720]")
+                from claude_shadow import report as claude_report
+                print(json.dumps(claude_report(ROOT, int(argv[2]) if len(argv) == 3 else 168), indent=2))
             elif cmd == "cost":
                 if len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--hours"):
                     raise ValueError("usage: effortlane cost [--hours 1..720]")
